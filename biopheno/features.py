@@ -344,13 +344,36 @@ def _load_stage1_uid_sets() -> dict[str, set[str]] | None:
     }
 
 
-def _cross_check_stage1_uids(day: str, fov: str, meta: pd.DataFrame, stage1: dict[str, set[str]] | None) -> str:
-    """把本视野重建出的 uid 集合与 Stage 1 落盘的 uid 集合对齐，返回 QC 里的核对结果。
+def _stage1_catalog(day: str, fov: str) -> tuple[pd.DataFrame, dict[int, np.ndarray], np.ndarray]:
+    """读 Stage 1 的产物：实例 meta、**已对齐坐标下**的轮廓、原图亮度图。
 
-    为什么要有这一步：Stage 2 必须重新 `build_catalog`（Stage 1 不落 image/labels，而纹理特征需要原图）。
-    如果 cfg（`N_CONTOUR_POINTS` / `ALIGN_MAX_SHIFT_PX`）或 `instances.py` 在两次运行之间被改动，
-    Stage 2 重建出的轮廓就会与 Stage 1 落盘的 `contours.npz` 不同，特征会静默挂到别的轮廓上。
-    uid 集合（fov_标签_帧号）能捕捉"对齐/标签图导致的实例集变化"，对不上就直接报错。
+    为什么不再调 `inst.build_catalog`：那一步是 Stage 1 的活（±8 px 对齐搜索、逐标签求外轮廓、
+    裁剪代表图），对 15 MP 的图每个视野约 80 s；而 Stage 2 只需要"已对齐的轮廓"（Stage 1 已落盘到
+    `contours.npz`）和原图（读文件即可）。于是 Stage 2 从"重算一遍 Stage 1"变成"读盘 + 算特征"，
+    一个字节的数字都不会变（轮廓、图像、画布尺寸三者都与重算得到的一致）。
+
+    画布尺寸取原图前两维：`align_mask_to_image` 返回的标签图就铺在 `image.shape[:2]` 上，
+    与原先 `catalog["labels"].shape` 完全一致（即使掩码比原图小）。
+    """
+    stage1_dir = Path(cfg.OUTPUT_ROOT) / inst._INSTANCES_SUBDIR / str(day) / str(fov)
+    try:
+        catalog = inst.load_catalog(stage1_dir)
+    except FileNotFoundError as exc:
+        _fail(
+            f"读不到 {day}/{fov} 的 Stage1 产物（{stage1_dir}：{exc}）。Stage2 直接复用 Stage1 的"
+            "已对齐轮廓与原图，不再重算对齐/轮廓；请先跑 Stage1，并确认 --output 指向同一棵产物树"
+        )
+    image = inst._to_luma(inst._read_image(str(day), str(fov)))
+    return catalog["meta"], catalog["contours"], image
+
+
+def _cross_check_stage1_uids(day: str, fov: str, meta: pd.DataFrame, stage1: dict[str, set[str]] | None) -> str:
+    """把本视野读回来的 uid 集合与 Stage 1 汇总表的 uid 集合对齐，返回 QC 里的核对结果。
+
+    为什么要有这一步：Stage 2 现在**直接复用** Stage 1 落盘的 `contours.npz`（见 `_stage1_catalog`），
+    但 `cfg.N_CONTOUR_POINTS` / `ALIGN_MAX_SHIFT_PX` 之类的参数可能在两次运行之间被改过——那会让
+    Stage 1 的产物与当前参数不一致。uid 集合（fov_标签_帧号）能捕捉"实例集/对齐变化"，
+    对不上就直接报错，而不是让特征静默挂到别的轮廓上。
 
     返回写进 QC 的 `uid_cross_check`，取值：
 
@@ -446,7 +469,7 @@ def run_stage2(days: list[str] | None = None, fovs: list[str] | None = None) -> 
     stage1_uids = _load_stage1_uid_sets()
     if stage1_uids is None:
         warnings.warn(
-            "找不到 Stage1 的 instances/all_instances.csv，本次无法核对重建出的实例与 Stage1 落盘的是否一致"
+            "找不到 Stage1 的 instances/all_instances.csv，本次无法核对复用到的实例与 Stage1 汇总表是否一致"
             "（QC 里记为 not_checked_no_all_instances）",
             stacklevel=2,
         )
@@ -471,10 +494,9 @@ def run_stage2(days: list[str] | None = None, fovs: list[str] | None = None) -> 
         for fov in fov_list:
             if (str(day), str(fov)) not in frames:
                 continue  # 输入里没有这一格（Stage1 也没跑过它）
-            catalog = inst.build_catalog(day, fov)
-            meta = catalog["meta"]
-            contours_by_label = catalog["contours"]
-            # 先核对"重建出的实例"与 Stage 1 落盘的是同一批，再往下算（对不上直接 RuntimeError）
+            meta, contours_by_label, image = _stage1_catalog(day, fov)
+            imshape = image.shape
+            # 先核对"复用到的实例"与 Stage 1 汇总表是同一批，再往下算（对不上直接 RuntimeError）
             uid_check = _cross_check_stage1_uids(day, fov, meta, stage1_uids)
             # 只算有轮廓的实例；contours 里没有键的标签照样留在 meta 里，但这里数一下跳过多少
             keep_labels = [int(label) for label in meta["label"] if int(label) in contours_by_label]
@@ -503,10 +525,10 @@ def run_stage2(days: list[str] | None = None, fovs: list[str] | None = None) -> 
             contours = [contours_by_label[label] for label in keep_labels]
 
             t0 = time.perf_counter()
-            shape, names_s = compute_shape_features(contours, catalog["labels"].shape, cfg.PIXEL_RES)
+            shape, names_s = compute_shape_features(contours, imshape, cfg.PIXEL_RES)
             shape_seconds = time.perf_counter() - t0
             t0 = time.perf_counter()
-            appearance, names_a = compute_appearance_features(catalog["image"], contours, cfg.PIXEL_RES)
+            appearance, names_a = compute_appearance_features(image, contours, cfg.PIXEL_RES)
             appearance_seconds = time.perf_counter() - t0
             # 每家族的非有限值计数：只记不填（ECT 会在拟合前填 0，那是 sklearn 的硬要求），
             # Task 5 按 NaN 剔列时才有据可查

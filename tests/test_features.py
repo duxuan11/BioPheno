@@ -9,6 +9,8 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
+import tifffile
+from PIL import Image
 
 from biopheno import config as cfg
 from biopheno import features as feat
@@ -23,6 +25,23 @@ def _write_stage1_summary(root, day_to_fov_uids):
         {"day": day, "fov": fov, "instance_uid": uid} for (day, fov), uids in day_to_fov_uids.items() for uid in uids
     ]
     pd.DataFrame(rows, columns=["day", "fov", "instance_uid"]).to_csv(outdir / "all_instances.csv", index=False)
+
+
+def _write_stage1_artifacts(monkeypatch, root, day, fov, catalog, image, labels):
+    """把一组合成实例按 **Stage 1 的落盘格式**写成一份可复用的产物，并登记原图/掩码输入。
+
+    Stage 2 现在直接 `load_catalog` + `_read_image`（不再重算对齐与轮廓，见 `features._stage1_catalog`），
+    所以测试也必须走"先有 Stage 1 产物"这条真实路径；原图/掩码通过 `cfg.INPUT_FILES` 登记，
+    不依赖 `config.DATA_ROOT` 的旧目录布局。
+    """
+    inst.save_catalog(catalog, root / "instances" / day / fov)
+    raw = root / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    image_path = raw / f"{fov}_{day}.png"
+    mask_path = raw / f"{fov}_{day}.tif"
+    Image.fromarray(np.stack([image, image, image], axis=-1)).save(image_path)  # 真实原图是三通道 PNG
+    tifffile.imwrite(mask_path, labels)
+    monkeypatch.setitem(cfg.INPUT_FILES, (day, fov), (image_path, mask_path))
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +100,9 @@ def test_run_stage2_writes_features_and_nan_motion_columns(monkeypatch, fake_dat
     """守口径：Stage 2 落盘四份产物；shape/appearance 有限、motion 整列 NaN、QC 记账自洽。"""
     monkeypatch.setattr(cfg, "DATA_ROOT", fake_dataset)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
+    # Stage 2 复用 Stage 1 的产物：先把本轮"Stage 1"落盘（build_catalog 读的就是 fake_dataset）
+    for day in ("day0", "day3"):
+        inst.save_catalog(inst.build_catalog(day, "A1"), tmp_path / "instances" / day / "A1")
     df = feat.run_stage2(days=["day0", "day3"], fovs=["A1"])
 
     outdir = tmp_path / "features"
@@ -132,9 +154,8 @@ def test_run_stage2_skips_instances_without_contour(monkeypatch, make_mask_and_i
     extra["instance_uid"] = "A1_3_0"
     catalog["meta"] = pd.concat([catalog["meta"], extra], ignore_index=True)
 
-    monkeypatch.setattr(cfg, "DATA_ROOT", tmp_path / "unused")
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
-    monkeypatch.setattr(inst, "build_catalog", lambda day, fov: catalog)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day0", "A1", catalog, image, labels)
 
     df = feat.run_stage2(days=["day0"], fovs=["A1"])
     assert len(df) == len(contours) == 2  # 只保留有轮廓的两行
@@ -195,9 +216,9 @@ def test_run_stage2_skips_fov_with_zero_contours(monkeypatch, make_mask_and_imag
     normal = inst.build_catalog("day0", "A1", image=image, labels=labels)
     blank = inst.build_catalog("day3", "A1", image=image, labels=labels)
     blank["contours"] = {}  # meta 有 2 行，但一个轮廓都没有
-    catalogs = {("day0", "A1"): normal, ("day3", "A1"): blank}
-    monkeypatch.setattr(inst, "build_catalog", lambda day, fov: catalogs[(day, fov)])
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day0", "A1", normal, image, labels)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day3", "A1", blank, image, labels)
 
     order = ["day3", "day0"] if empty_first else ["day0", "day3"]
     df = feat.run_stage2(days=order, fovs=["A1"])
@@ -222,9 +243,9 @@ def test_run_stage2_skips_fov_with_empty_feature_block(monkeypatch, make_mask_an
     normal = inst.build_catalog("day0", "A1", image=image, labels=labels)
     image1, labels1 = make_mask_and_image(n_blobs=1)
     degenerate = inst.build_catalog("day3", "A1", image=image1, labels=labels1)
-    catalogs = {("day0", "A1"): normal, ("day3", "A1"): degenerate}
-    monkeypatch.setattr(inst, "build_catalog", lambda day, fov: catalogs[(day, fov)])
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day0", "A1", normal, image, labels)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day3", "A1", degenerate, image1, labels1)
 
     real_shape = feat.compute_shape_features
 
@@ -249,8 +270,8 @@ def test_run_stage2_rejects_block_width_that_disagrees_with_names(monkeypatch, m
     # 宽度与名数不一致时列的含义无法确定，必须报错而不是拼进去
     image, labels = make_mask_and_image(n_blobs=2)
     catalog = inst.build_catalog("day0", "A1", image=image, labels=labels)
-    monkeypatch.setattr(inst, "build_catalog", lambda day, fov: catalog)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day0", "A1", catalog, image, labels)
     monkeypatch.setattr(
         feat, "compute_shape_features", lambda c, imshape, pixel_res: (np.zeros((len(c), 5)), ["a", "b"])
     )
@@ -261,12 +282,12 @@ def test_run_stage2_rejects_block_width_that_disagrees_with_names(monkeypatch, m
 
 def test_run_stage2_cross_checks_stage1_uids(monkeypatch, make_mask_and_image, tmp_path):
     """守口径：uid 集合与 Stage 1 汇总表一致才继续；少一行时要带视野名与个数差异拒绝。"""
-    # Stage 2 重新 build_catalog，若 cfg（N_CONTOUR_POINTS / ALIGN_MAX_SHIFT_PX）或 instances.py
-    # 在两次运行之间被改动，特征会悄悄挂到与 Stage 1 落盘的轮廓不同的实例上。
+    # 实例集必须与 Stage 1 汇总表一致：参数（N_CONTOUR_POINTS / ALIGN_MAX_SHIFT_PX）在两次运行之间
+    # 被改过、或产物被半途替换时，特征会悄悄挂到与汇总表不同的实例上，这里必须拒绝继续。
     image, labels = make_mask_and_image(n_blobs=2)
     catalog = inst.build_catalog("day0", "A1", image=image, labels=labels)
-    monkeypatch.setattr(inst, "build_catalog", lambda day, fov: catalog)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day0", "A1", catalog, image, labels)
     uids = [str(u) for u in catalog["meta"]["instance_uid"]]
     assert len(uids) == 2
 
@@ -290,8 +311,8 @@ def test_run_stage2_rejects_duplicate_feature_names(monkeypatch, make_mask_and_i
     # 用 _fail（ValueError）而不是裸 assert：`python -O` 会把 assert 整条删掉，这道关卡就消失了。
     image, labels = make_mask_and_image(n_blobs=2)
     catalog = inst.build_catalog("day0", "A1", image=image, labels=labels)
-    monkeypatch.setattr(inst, "build_catalog", lambda day, fov: catalog)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day0", "A1", catalog, image, labels)
     monkeypatch.setattr(feat, "motion_placeholder_names", lambda: ["ECT_rbf_1"])
 
     with pytest.raises(ValueError, match="重复"):
@@ -308,9 +329,9 @@ def test_run_stage2_tolerates_empty_fov_absent_from_stage1_summary(monkeypatch, 
     blank = inst.build_catalog("day3", "A1", image=image, labels=labels)
     blank["meta"] = blank["meta"].iloc[0:0].copy()  # 分割结果全空：0 个实例
     blank["contours"] = {}
-    catalogs = {("day0", "A1"): normal, ("day3", "A1"): blank}
-    monkeypatch.setattr(inst, "build_catalog", lambda day, fov: catalogs[(day, fov)])
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day0", "A1", normal, image, labels)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day3", "A1", blank, image, labels)
     # 汇总表里只有一个视野的行（与 Stage 1 对零实例视野的写法完全一致）
     _write_stage1_summary(tmp_path, {("day0", "A1"): [str(u) for u in normal["meta"]["instance_uid"]]})
 
@@ -330,8 +351,8 @@ def test_run_stage2_raises_when_stage1_summary_lacks_nonempty_fov(monkeypatch, m
     # 那说明 Stage 1 与本次重建的视野集合不同（days/fovs 被改过，或 Stage 1 没跑过这个视野）。
     image, labels = make_mask_and_image(n_blobs=2)
     catalog = inst.build_catalog("day0", "A1", image=image, labels=labels)
-    monkeypatch.setattr(inst, "build_catalog", lambda day, fov: catalog)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
+    _write_stage1_artifacts(monkeypatch, tmp_path, "day0", "A1", catalog, image, labels)
     _write_stage1_summary(tmp_path, {("day3", "A1"): ["A1_9_0"]})  # 只有别的视野的行
 
     with pytest.raises(RuntimeError, match="day0/A1") as excinfo:

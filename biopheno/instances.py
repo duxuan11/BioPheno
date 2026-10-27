@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import skimage.transform as sktform
 import tifffile
+from scipy import ndimage
+from scipy.signal import fftconvolve
 from skimage import io
 from skimage.measure import find_contours
 from skimage.util import img_as_ubyte
@@ -23,6 +25,12 @@ _NAME_SUFFIX: str = "_多聚焦融合"
 
 # 少于这么多点的候选轮廓直接丢弃：说明标签只有一两像素或者退化，重采样没有意义。
 _MIN_CONTOUR_POINTS: int = 6
+
+# 对齐搜索的"FFT 粗筛 → 精确重算"。粗筛只负责排序，取值一律由原写法（`_place` + 掩码内外均值）
+# 重算，所以结果与"遍历 ±max_shift 全窗口"逐位相同；
+# 落在最优值这个相对容差内的候选多于 `_ALIGN_SHORTLIST_CAP` 个时，退回全遍历（正确性优先）。
+_ALIGN_SCREEN_TOL: float = 1e-4
+_ALIGN_SHORTLIST_CAP: int = 24
 
 # 落盘文件名（Spec §6-Stage1-7）。
 _META_FILE: str = "instances.csv"
@@ -92,6 +100,58 @@ def _place(labels: np.ndarray, dy: int, dx: int, shape: tuple[int, int]) -> np.n
     return out
 
 
+def _align_shortlist(img_c: np.ndarray, mask: np.ndarray, max_shift: int) -> list[tuple[int, int]] | None:
+    """用一次 FFT 相关粗筛 ±max_shift 内所有平移，返回按"目标值降序、位移升序"排好的候选。
+
+    原理：单次平移的掩码内亮度和就是互相关
+    `Σ_p I[p]·M[p−(dy,dx)]`，一次 `fftconvolve` 同时得出全部平移；掩码内像素数用积分图
+    在保留矩形上取和（O(1)/平移），所以整张 15 MP 图只需要 1 次 FFT 而不是 289 次全图扫描。
+
+    粗筛**只用来排序**：真正的取值由 `align_mask_to_image` 用原写法（`_place` + 掩码内外均值）逐点重算，
+    所以不影响结果。返回 None 表示落在容差内的候选太多，调用方应退回全遍历。
+    """
+    height, width = mask.shape
+    total_m = int(mask.sum())
+    n_pix = int(mask.size)
+    total_i = float(img_c.sum())
+    if total_m == 0:
+        return []  # 全空掩码：目标函数处处无定义，交给精确重算去跳过
+
+    # 积分图（int64，逐位精确）：保留矩形的掩码像素和 O(1) 取
+    integral = np.zeros((height + 1, width + 1), dtype=np.int64)
+    integral[1:, 1:] = mask.cumsum(0, dtype=np.int64).cumsum(1, dtype=np.int64)
+
+    def _retained(dy: int, dx: int) -> int:
+        """平移后仍在画布内的掩码像素数（源矩形 = 输出保留区反推）。"""
+        r0, r1 = max(0, -dy), min(height, height - dy)
+        c0, c1 = max(0, -dx), min(width, width - dx)
+        if r1 <= r0 or c1 <= c0:
+            return 0
+        return int(integral[r1, c1] - integral[r0, c1] - integral[r1, c0] + integral[r0, c0])
+
+    # 相关结果的索引约定：mode='full' 下 lag (dy, dx) 落在 (H-1+dy, W-1+dx)
+    inside_sum = fftconvolve(img_c.astype(np.float32), mask[::-1, ::-1].astype(np.float32), mode="full")
+    screened: list[tuple[float, int, int]] = []
+    for cand_dy in range(-max_shift, max_shift + 1):
+        for cand_dx in range(-max_shift, max_shift + 1):
+            n_in = _retained(cand_dy, cand_dx)
+            if n_in <= 0 or n_in >= n_pix:
+                continue  # 掩码会被推出画布或占满画布，目标函数无定义
+            s_in = float(inside_sum[height - 1 + cand_dy, width - 1 + cand_dx])
+            objective = abs(s_in / n_in - (total_i - s_in) / (n_pix - n_in))
+            screened.append((objective, cand_dy, cand_dx))
+    if not screened:
+        return []
+    # 稳定排序：目标值降序、位移量升序，与全遍历的"同分取更小平移"拔尖一致
+    screened.sort(key=lambda item: (-item[0], abs(item[1]) + abs(item[2])))
+    best = screened[0][0]
+    tol = max(1e-9, _ALIGN_SCREEN_TOL * abs(best))
+    shortlist = [(dy, dx) for objective, dy, dx in screened if objective >= best - tol]
+    if len(shortlist) > _ALIGN_SHORTLIST_CAP:
+        return None  # 候选太密（近似平移对称的图）：宁可慢，也不改变结果
+    return shortlist
+
+
 def align_mask_to_image(image: np.ndarray, labels: np.ndarray, max_shift: int) -> tuple[np.ndarray, tuple[int, int]]:
     """±max_shift 平移搜索，最大化"掩码内均值 − 掩码外均值"的**绝对值**（Spec §6-Stage1-1）。
 
@@ -99,9 +159,15 @@ def align_mask_to_image(image: np.ndarray, labels: np.ndarray, max_shift: int) -
     有符号差在正确对齐处是负的最大的（约 −60），而把掩码推出组织让内外均值趋同反而"更大"（趋近 0），
     搜索会主动错位；取绝对值既兼容更暗/更亮两种极性，又保证对齐位置对比最强。
 
+    实现分两步，但**结果与"逐平移全图扫描"逐位相同**：
+
+    1. `_align_shortlist` 用一次 FFT 相关粗筛 289 个平移，只留下目标值最好的少数候选；
+    2. 这些候选再用原写法（`_place` + 掩码内外均值，float64）精确重算，按原来的"目标值降序、
+       位移量升序"拔尖。候选太密时直接退回全遍历（`_exhaustive`）。
+
     掩码与原图的画布尺寸可能差几行几列，先各自裁到公共最小尺寸再搜索平移。返回
     （补齐到 `image.shape[:2]` 的 labels，(dy, dx) 偏移）；正常数据偏移应为 0，非零时
-    Task 3 会记录告警（Spec 风险表：>= 8 px 即触到搜索边界、需人工确认）。
+    run_stage1 会记录告警（Spec 风险表：>= 8 px 即触到搜索边界、需人工确认）。
 
     画布契约：labels 永远是二维 (H, W) 标签图，即使传入 RGB 三通道原图（`_read_image` 的返回类型），
     也按前两维 `image.shape[:2]` 分配画布，绝不把三维 shape 传给 `_place`。
@@ -112,19 +178,38 @@ def align_mask_to_image(image: np.ndarray, labels: np.ndarray, max_shift: int) -
     img_c = img[: common[0], : common[1]].astype(np.float64)
     lab_c = labels[: common[0], : common[1]]
 
-    best_key: tuple[float, int] | None = None  # (目标函数, -|dy|-|dx|)：同分时取更小的平移
-    dy = dx = 0
-    for cand_dy in range(-max_shift, max_shift + 1):
-        for cand_dx in range(-max_shift, max_shift + 1):
-            shifted = _place(lab_c, cand_dy, cand_dx, common)
-            inside = shifted > 0
-            n_in = int(inside.sum())
-            if n_in == 0 or n_in == inside.size:
-                continue  # 掩码被移出画布或占满画布，目标函数无定义
-            objective = abs(float(img_c[inside].mean() - img_c[~inside].mean()))
+    def _objective(cand_dy: int, cand_dx: int) -> float | None:
+        """单点目标函数（优化前的算法原样搬进来，作为唯一的取値依据）。"""
+        shifted = _place(lab_c, cand_dy, cand_dx, common)
+        inside = shifted > 0
+        n_in = int(inside.sum())
+        if n_in == 0 or n_in == inside.size:
+            return None  # 掩码被移出画布或占满画布，目标函数无定义
+        return abs(float(img_c[inside].mean() - img_c[~inside].mean()))
+
+    def _pick(candidates) -> tuple[int, int]:
+        """在给定候选上按原拔尖规则取最优（同分取平移量更小的）。"""
+        best_key: tuple[float, int] | None = None  # (目标函数, -|dy|-|dx|)
+        dy = dx = 0
+        for cand_dy, cand_dx in candidates:
+            objective = _objective(cand_dy, cand_dx)
+            if objective is None:
+                continue
             key = (objective, -(abs(cand_dy) + abs(cand_dx)))
             if best_key is None or key > best_key:
                 best_key, dy, dx = key, cand_dy, cand_dx
+        return dy, dx
+
+    shortlist = _align_shortlist(img_c, lab_c > 0, max_shift)
+    if shortlist is None:
+        # 兑底：原实现的全遍历（与优化前完全一致，只是慢）
+        dy, dx = _pick(
+            (cand_dy, cand_dx)
+            for cand_dy in range(-max_shift, max_shift + 1)
+            for cand_dx in range(-max_shift, max_shift + 1)
+        )
+    else:
+        dy, dx = _pick(shortlist)
 
     return _place(lab_c, dy, dx, canvas), (dy, dx)
 
@@ -143,23 +228,50 @@ def _resample_closed(contour: np.ndarray, n_points: int) -> np.ndarray:
     return np.column_stack([np.interp(targets, s, pts[:, axis]) for axis in (0, 1)])
 
 
+def _label_slices(labels: np.ndarray) -> dict[int, tuple[slice, slice]]:
+    """每个非零标签的裁剪窗口（包围盒外扩 1 像素，裁到画布内）：label -> (行 slice, 列 slice)。
+
+    为什么可以这样裁：`find_contours` 只在 0.5 等值线的**局部**像素邻域上走线，所以把一个标签
+    四周留出 1 像素背景后单独求轮廓，与在整张 15 MP 图上求出来的点逐位相同（加上窗口原点即可）。
+    而原实现的主要开销恰恰是逐标签做整图比较（`labels == k`：1145 个标签 × 1530 万像素）。
+
+    末尾边界不补零：窗口裁到画布内，贴边实例在裁剪图里的边界仍然就是图像边界，
+    与整图调用时的边界行为一致。
+    """
+    height, width = labels.shape
+    slices: dict[int, tuple[slice, slice]] = {}
+    for label, box in enumerate(ndimage.find_objects(labels), start=1):
+        if box is None:
+            continue  # 这个标签号在图中不存在
+        rows, cols = box
+        slices[label] = (
+            slice(max(int(rows.start) - 1, 0), min(int(rows.stop) + 1, height)),
+            slice(max(int(cols.start) - 1, 0), min(int(cols.stop) + 1, width)),
+        )
+    return slices
+
+
 def extract_contours(labels: np.ndarray, n_points: int) -> tuple[dict[int, np.ndarray], dict[int, int]]:
     """每个标签的最长闭合外轮廓，等弧长重采样到 n_points 点，坐标为 (row, col)。
 
     返回（label -> (n_points, 2) 轮廓，label -> 被丢弃的候选轮廓数）。凹形轮廓保留
     （find_contours 直接给出凹凸一致的边界），点数 < 6 的候选被丢弃并计数。
+
+    实现上只在每个标签的包围盒窗口里求轮廓（`_label_slices`），再用整数原点平移回全图坐标：
+    结果与原实现（逐标签整图 `find_contours`）逐位相同，但避免了 1145 次全图布尔比较。
     """
     contours: dict[int, np.ndarray] = {}
     discarded: dict[int, int] = {}
-    for label in np.unique(labels):
-        if label == 0:
-            continue  # 0 是背景
-        candidates = find_contours(labels == label, 0.5)
+    for label, window in _label_slices(labels).items():
+        r0, c0 = int(window[0].start), int(window[1].start)
+        candidates = find_contours(labels[window] == label, 0.5)
         kept = [c for c in candidates if len(c) >= _MIN_CONTOUR_POINTS]
         discarded[int(label)] = len(candidates) - len(kept)
         if not kept:
             continue  # 全部候选都太小：不进 contours，但 discarded 仍计数，build_catalog 会补上 meta 行
-        contours[int(label)] = _resample_closed(max(kept, key=len), n_points)
+        # 裁剪坐标 → 全图坐标：整数平移，对浮点坐标是精确运算
+        points = max(kept, key=len) + np.array([r0, c0], dtype=np.float64)
+        contours[int(label)] = _resample_closed(points, n_points)
     return contours, discarded
 
 
@@ -298,9 +410,16 @@ def build_catalog(
     # "只打标不删"：出现在掩码里的每个标签都要有 meta 行。候选轮廓全被丢弃的标签在 contours /
     # patches 里没有条目，但仍要留下 is_small 与 n_contours_discarded 的记录。
     label_ids = sorted(int(k) for k in np.unique(labels) if int(k) != 0)
+    # 每个标签只在自己的包围盒窗口里找非零像素（`_label_slices`），行主序与整图
+    # `np.nonzero(labels == label)` 完全一致，只是少了窗口原点；把原点加回整数坐标后，
+    # centroid / area / touches_border 与整图扫描逐位相同（整数和不变，除法是同一个浮点运算）。
+    windows = _label_slices(labels)
     rows = []
     for label in label_ids:
-        rows_ii, cols_ii = np.nonzero(labels == label)
+        window = windows[label]
+        rows_local, cols_local = np.nonzero(labels[window] == label)
+        rows_ii = rows_local + int(window[0].start)
+        cols_ii = cols_local + int(window[1].start)
         if label in contours:
             r0, c0, r1, c1 = bbox_of_contour(contours[label])
         else:
