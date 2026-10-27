@@ -324,6 +324,7 @@ def _spy_figures(monkeypatch):
 
     @contextlib.contextmanager
     def spy(**kwargs):
+        """透传 `_open_figure` 的上下文管理器，顺手把 figure 记进 `figures`。"""
         with original(**kwargs) as figure:
             figures.append(figure)
             yield figure
@@ -338,13 +339,16 @@ def _images(figure) -> list[np.ndarray]:
 
 
 def test_render_static_writes_seven_figures(fake_analysis_dir, tmp_path):
+    """守口径：必须正好产出 F1–F6b 这 7 个文件名，且每张都不是空壳。"""
     paths = figs.render_static(fake_analysis_dir, outdir=tmp_path)
     names = {p.name for p in paths}
     assert names == _EXPECTED_FIGURES
+    # 1 KB 是"真画了东西"的下限：空白 PNG 只有几百字节，能顶住"建了 figure 但没画"的退化。
     assert all(p.stat().st_size > 1000 for p in paths)
 
 
 def test_render_static_tolerates_single_cluster(fake_analysis_dir, tmp_path):
+    """守边界：退化路径（所有实例归 1 簇）也必须出满 7 张图，不许 IndexError。"""
     # 只有一个簇时不应 IndexError（Review Focus #5）
     paths = figs.render_static(fake_analysis_dir, outdir=tmp_path, force_single_cluster=True)
     assert {p.name for p in paths} == _EXPECTED_FIGURES
@@ -352,17 +356,20 @@ def test_render_static_tolerates_single_cluster(fake_analysis_dir, tmp_path):
 
 
 def test_render_static_closes_every_figure(fake_analysis_dir, tmp_path):
+    """守口径：出图函数自己 plt.close，跑完进程里不留 figure（长跑/多次调用不吃内存）。"""
     figs.render_static(fake_analysis_dir, outdir=tmp_path)
     assert plt.get_fignums() == []
 
 
 def test_render_static_names_the_stage_of_a_missing_artifact(fake_analysis_dir, tmp_path):
+    """守口径：缺 Stage5 产物时报错且消息点名 Stage5，不许默默少画一张。"""
     (fake_analysis_dir / "analysis" / "cluster_labels.csv").unlink()
     with pytest.raises(ValueError, match="Stage5"):
         figs.render_static(fake_analysis_dir, outdir=tmp_path)
 
 
 def test_render_static_missing_modules_points_at_stage4(fake_analysis_dir, tmp_path):
+    """守口径：缺 Stage4 的 cluster_map.npz 时消息点名 Stage4（定位到阶段而非文件名）。"""
     (fake_analysis_dir / "modules" / "cluster_map.npz").unlink()
     with pytest.raises(ValueError, match="Stage4"):
         figs.render_static(fake_analysis_dir, outdir=tmp_path)
@@ -385,6 +392,7 @@ def test_cluster_panels_pick_four_images_from_own_cluster():
     coords = np.vstack([np.zeros((5, 2)), np.full((4, 2), 9.0)]) + np.arange(9)[:, None] * 0.01
     uids = [f"A1_{i + 1}_0" for i in range(9)]
     patches = {uid: np.full((10, 10), 100, dtype=np.uint8) for uid in uids}
+    # 上面的 0.01 递增偏移让"离簇中心最近"的排序唯一，选中哪 4 张可复现、不靠随机数。
 
     panels = figs._cluster_panels(coords, clusters, uids, patches, patches, n_per_cluster=4)
 
@@ -397,6 +405,7 @@ def test_cluster_panels_pick_four_images_from_own_cluster():
 
 
 def test_cluster_panels_survive_a_cluster_without_patches():
+    """守边界：簇内可用 patch 少于 n_per_cluster 时照样出面板（其余格留白），不越界取图。"""
     clusters = np.array([1, 1, 2])
     coords = np.zeros((3, 2))
     uids = ["A1_1_0", "A1_2_0", "A1_3_0"]
@@ -427,6 +436,7 @@ def test_contribution_scores_fall_back_to_recompute(fake_analysis_dir):
 
 
 def test_contribution_scores_prefer_persisted_stage4_qc(fake_analysis_dir):
+    """守口径：已落盘的 type/scope contribution 优先直接采用，不重算、不改写数值。"""
     type_scores, scope_scores, source = figs._contribution_scores(fake_analysis_dir)
     assert source == "stage4_qc"
     assert np.allclose(type_scores, [0.62, 0.38, 0.0])
@@ -501,6 +511,7 @@ def test_f3_raises_when_a_cluster_has_no_density_field(tmp_path):
 
     with pytest.raises(ValueError, match="密度场"):
         figs._plot_f3(tmp_path / "f3.png", coords, clusters, broken)
+    # 先校验后落盘：报错时不能留下一张画了一半的 F3。
     assert not (tmp_path / "f3.png").exists()
 
 
@@ -611,6 +622,7 @@ def test_representative_selection_skips_small_instances():
     """`is_small` 的实例不进代表图候选；整簇都是小实例时才退回包含它们（并记在 fallback 里）。"""
     clusters = np.array([1] * 6 + [2] * 2)
     coords = np.zeros((8, 2))
+    # 沿 x 轴排一排：到簇中心（簇内均值）的距离严格递增，选中谁只由距离决定。
     coords[:, 0] = np.arange(8)
     uids = [f"A1_{index + 1}_0" for index in range(8)]
     index = {uid: (Path("patches.npz"), "native", "sift") for uid in uids}
@@ -644,6 +656,7 @@ def test_cluster_panels_apply_the_same_small_instance_filter():
 
 def test_f1_caption_states_the_small_instance_filter(fake_analysis_dir, tmp_path, monkeypatch):
     """F1 图注要说明候选跳过了 `is_small`，并点名“整簇都是小实例”的簇。"""
+    # 用 min() 决定保留哪一个，让结果可复现（集合序不确定）。
     meta_path = fake_analysis_dir / "instances" / "all_instances.csv"
     labels = pd.read_csv(fake_analysis_dir / "analysis" / "cluster_labels.csv")
     cluster_one = set(labels.loc[labels["cluster"] == 1, "instance_uid"])
@@ -660,6 +673,7 @@ def test_f1_caption_states_the_small_instance_filter(fake_analysis_dir, tmp_path
     original = figs._read_patch_arrays
 
     def spy(index, uids):
+        """包一层 `_read_patch_arrays`，记下这次实际被读进内存的 uid 列表。"""
         seen["uids"] = list(uids)
         return original(index, uids)
 
@@ -682,12 +696,14 @@ def test_render_static_materialises_only_the_selected_patches(fake_analysis_dir,
     original = figs._read_patch_arrays
 
     def spy(index, uids):
+        """包一层 `_read_patch_arrays`，记下这次实际被读进内存的 uid 列表。"""
         seen["uids"] = list(uids)
         return original(index, uids)
 
     monkeypatch.setattr(figs, "_read_patch_arrays", spy)
     figs.render_static(fake_analysis_dir, outdir=tmp_path)
 
+    # 4（簇 1 的 12 个候选里只取 4）+ 3 + 3 = 10；把整簇都读进来就会是 12。
     assert len(seen["uids"]) == 10
     assert len(set(seen["uids"])) == 10
 
@@ -711,6 +727,7 @@ def test_render_static_keeps_the_previous_figures_when_rendering_fails(fake_anal
         kept = tmp_path / name
         assert kept.exists()
         assert kept.stat().st_size == size
+    # 原子写入的临时文件必须清干净：失败时不许留 .tmp-* 半成品。
     assert not list(tmp_path.glob(".tmp-*"))
 
 
@@ -719,6 +736,7 @@ def test_render_static_keeps_the_previous_figures_when_rendering_fails(fake_anal
 
 @pytest.mark.parametrize(
     ("n_clusters", "expected"),
+    # expected = (per_row, rows, panel_cols)：panel_cols 是 2 张/簇拼图的列数，不是行数。
     [
         (1, (1, 1, 2)),
         (3, (1, 3, 2)),
@@ -742,6 +760,7 @@ def test_f1_patch_grid_stays_within_four_rows(n_clusters, expected):
 
 
 def test_f1_patch_grid_rejects_empty_cluster_list():
+    """守边界：簇数为 0 时报 ValueError，不许返回一个看似合法的空网格。"""
     with pytest.raises(ValueError, match="至少要有 1 个簇"):
         figs._f1_patch_grid(0)
 
@@ -764,6 +783,7 @@ def test_f1_umap_panel_is_square_with_readable_cluster_numbers(fake_analysis_dir
 
 
 def test_square_view_rejects_non_two_dimensional_coordinates():
+    """守边界：坐标不是 (n, 2) 时直接报错，不许静默只取前两列画成正方形。"""
     figure = plt.figure()
     try:
         with pytest.raises(ValueError, match="UMAP 坐标"):

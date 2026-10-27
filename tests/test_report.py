@@ -380,10 +380,12 @@ def _match_qc(rows: list[dict], *, zero_offsets: bool = False) -> dict:
 
 
 def _track_length(rows: list[dict], key: tuple[str, int]) -> int:
+    """返回某个 (fov, track_id) 在轨迹表里出现的次数，即这条 track 的长度。"""
     return sum(1 for row in rows if (row["fov"], row["track_id"]) == key)
 
 
 def _stage6b_qc(rows: list[dict]) -> dict:
+    """造 Stage6b 的 QC 字典：时间轴分箱、3 个子集、轨迹退化标记、转移与 affinity 口径。"""
     return {
         "time_axis": {
             "mode": "frame_idx 箱中心（frame_idx + 0.5）",
@@ -447,6 +449,7 @@ def fake_zero_offset_output(tmp_path) -> Path:
 
 
 def _text(path: Path) -> str:
+    """按 UTF-8 读整份文本（多是 report.md），返回字符串供断言做子串匹配。"""
     return path.read_text(encoding="utf-8")
 
 
@@ -457,7 +460,9 @@ def test_report_contains_required_sections(fake_full_output):
     text = _text(path)
     for key in ["实例数", "特征维度", "UMAP", "K", "模块", "匹配率", "局限"]:
         assert key in text, f"报告缺少 {key} 小节"
+    # 6741 是 Spec §2 那份数据的标签总数：报告必须显式引用数据事实，不能只写自算的合计。
     assert "6741" in text
+    # 没有真实标尺，长度/面积只能是像素单位：`PIXEL_RES` 这个常数必须写进报告，免得被读成 µm。
     assert "PIXEL_RES" in text
 
 
@@ -476,6 +481,7 @@ def test_figure_index_uses_actual_fov_count_not_config(monkeypatch, fake_full_ou
 
 def test_limitations_time_axis_follows_config(monkeypatch, fake_full_output):
     """“N 个离散采样点（day…，… h）”要按 cfg.DAYS / cfg.TIME_HOURS 写，不能照抄 0/72/120。"""
+    # 48 / 96 h 与这棵树里的 0 / 72 / 120 h 都不同：只有真按 cfg 拼这句话才能对上。
     monkeypatch.setattr(cfg, "TIME_HOURS", {"day0": 0.0, "day3": 48.0, "day5": 96.0})
     text = _text(report.write_report(fake_full_output))
     assert "**只有 3 个离散采样点**（day0 / day3 / day5，0 / 48 / 96 h）" in text
@@ -487,12 +493,14 @@ def test_instance_count_comparison_skipped_for_cli_input(monkeypatch, fake_full_
     6741 是 Spec §2 那份数据的标签总数；`--images/--masks` 换成 3 帧数据后它不属于本轮数据，
     继续写"数据事实是 6741、差额 …"就是报告自相矛盾。此时应如实说明"没有外部期望总数可比"。
     """
+    # 模拟命令行 `--images/--masks`：下面两行把输入目录换掉，等于本轮数据不再是 Spec §2 那份 9 视野数据。
     for name in ("IMAGE_DIR", "MASK_DIR"):
         monkeypatch.setattr(cfg, name, getattr(cfg, name))
     monkeypatch.setattr(cfg, "IMAGE_DIR", Path("D:/somewhere/images"))
     monkeypatch.setattr(cfg, "MASK_DIR", Path("D:/somewhere/masks"))
     text = _text(report.write_report(fake_full_output))
     assert "不做 6741 那类比对" in text
+    # 6693 = 6741 - 48：输入被命令行换掉时，这个差额一句话都不许出现。
     assert "差额 6693" not in text
 
 
@@ -528,6 +536,7 @@ def test_report_names_dropped_features_and_the_area_consequence(fake_full_output
 
     qc_path = fake_full_output / "preprocessed" / "stage3_qc.json"
     qc = json.loads(qc_path.read_text(encoding="utf-8"))
+    # 改造成真实数据上的剔除情形：两条 Shape_Context_* 零方差、area/convex_area 被高方差规则剔掉。
     qc["dropped_zero"] = ["Shape_Context_10", "Shape_Context_15"]
     qc["n_dropped_zero"] = 2
     qc["dropped_high_variance"] = ["area", "convex_area"]
@@ -536,6 +545,7 @@ def test_report_names_dropped_features_and_the_area_consequence(fake_full_output
 
     features = _text(report.write_report(fake_full_output)).split("## 2. 特征维度")[1].split("## 3.")[0]
     assert "`Shape_Context_10`" in features and "`Shape_Context_15`" in features
+    # 阈值 σ=2.0 与剔除个数 2 都必须印出来，读者才能判断“面积特征为何没进 UMAP”。
     assert "**高方差（σ=2.0，2）：`area`、`convex_area`" in features
     assert "原始面积特征就在这一步被剔除" in features
     assert "进入 UMAP 之前" in features
@@ -602,6 +612,7 @@ def _geometry_payload(*, all_aligned: bool = True) -> dict:
     """造一份“由核验脚本产出”的几何核验 JSON（4 个帧对，对齐时零偏移 IoU ≈ 1）。"""
 
     def entry(zero: float, best: float, offset: list[int]) -> dict:
+        """造一个帧对的几何条目：零偏移 IoU、最优 IoU、最优偏移、是否已在零偏移对齐。"""
         return {
             "zero_offset_iou": zero,
             "best_iou": best,
@@ -767,6 +778,7 @@ def test_report_cross_references_day_dominance_in_limitations(fake_full_output):
     labels = pd.read_csv(fake_full_output / "analysis" / "cluster_labels.csv")
     dominance = report._day_dominance(labels)
     assert f"{dominance['n_dominated']} 个单日占比 ≥ 50%" in limitations
+    # 份额按 1 位小数的百分数写（如 50.0%）：两边格式不一致就说明 §8 是另算的。
     assert f"{dominance['mean_share']:.1%}" in limitations
 
 
@@ -776,12 +788,14 @@ def test_report_states_f1_skips_small_instances(fake_full_output):
     assert "F1 代表图的口径" in text
     assert "跳过 `is_small`" in text
     assert "12 个小实例" in text  # 每组标签 1、2 是小实例（6 组 × 2）
+    # fixture 里两个簇都含 label>2 的实例，所以这句“每个簇都有非小实例”是数据事实。
     assert "每个簇都有非小实例" in text
 
     meta_path = fake_full_output / "instances" / "all_instances.csv"
     labels = pd.read_csv(fake_full_output / "analysis" / "cluster_labels.csv")
     cluster_one = set(labels.loc[labels["cluster"] == 1, "instance_uid"])
     meta = pd.read_csv(meta_path)
+    # 把簇 1 的实例全标成 is_small：报告此时必须点名这个簇没有可用的代表图。
     meta.loc[meta["instance_uid"].isin(cluster_one), "is_small"] = True
     meta.to_csv(meta_path, index=False)
 
@@ -794,6 +808,7 @@ def test_report_lists_figures_with_paper_mapping(fake_full_output):
     text = _text(report.write_report(fake_full_output))
     for name in _FIGURES:
         assert name in text, f"报告图索引缺少 {name}"
+    # 每张图都要带“论文 Fig. …”的对应关系，所以 "Fig." 的出现次数不少于图数。
     assert text.count("Fig.") >= len(_FIGURES)
     # F10 的两版必须都出现（Spec §6-Stage6-5 的双版本要求）
     assert "F10a" in text and "F10b" in text
@@ -817,6 +832,7 @@ def test_report_records_stage_timings_when_present(fake_full_output):
     )
     text = _text(report.write_report(fake_full_output))
     assert "运行耗时" in text
+    # 101.5 是 stage1_instances 的单阶段耗时，163.75 是 total_seconds：两个都必须落进报告。
     assert "101.5" in text and "163.75" in text
 
 
@@ -829,6 +845,7 @@ def test_report_without_timings_says_not_recorded(fake_full_output):
 def test_report_declares_umap_determinism_check(fake_full_output):
     """可复现性：有核验脚本产出的 `logs/umap_repeat_check.json` 时写明坐标是否一致；没有时写明未验证。"""
     text = _text(report.write_report(fake_full_output))
+    # 没有核验文件时只能写“未验证”，不能默认“重跑坐标就一定一致”。
     assert "未验证" in text
     logdir = fake_full_output / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
@@ -849,6 +866,7 @@ def test_report_declares_umap_determinism_check(fake_full_output):
         encoding="utf-8",
     )
     text = _text(report.write_report(fake_full_output))
+    # 只有 source=REPEAT_CHECK_TOOL 的文件才被采信：报告引用 identical=True 与 n_points=48。
     assert "已核验" in text
     assert "一致" in text
 
@@ -859,6 +877,7 @@ def test_report_requires_check_file_from_the_verifier_script(fake_full_output):
     logdir.mkdir(parents=True, exist_ok=True)
     check_path = logdir / report.REPEAT_CHECK_FILE
     text = _text(report.write_report(fake_full_output))
+    # 文件缺失：可复现性小节写“未核验”（“未验证”是它的原因句），且全文不许出现“已核验”。
     assert "未核验" in text
     assert "已核验" not in text
     # 手写的“自证”文件（有 verified/identical，但没有 source/checked_at）：报告不认
@@ -895,6 +914,7 @@ def test_report_requires_check_file_from_the_verifier_script(fake_full_output):
 def test_report_monotonicity_clause_follows_the_actual_value(fake_full_output):
     """“预处理量纲不单调是预期的”只在单调性真的是 false 时出现（否则报告自相矛盾）。"""
     text = _text(report.write_report(fake_full_output))
+    # fixture 的 monotone_preprocessed=False：只有真的是 false 时“不单调是预期的”才准出现。
     assert "预处理量纲单调：否" in text
     assert "预处理量纲不单调是预期的" in text
     metrics_path = fake_full_output / "analysis" / "kmeans_metrics.json"
@@ -935,6 +955,7 @@ def test_report_lists_warning_tail_instead_of_silently_truncating(fake_full_outp
     qc_path.write_text(json.dumps(qc, ensure_ascii=False), encoding="utf-8")
     text = _text(report.write_report(fake_full_output))
     assert "配准告警共 7 条" in text
+    # 只列前 5 条：第 6/7 条不出现，但“其余 2 条”+ 完整原文的出处必须写明。
     assert "告警 5" in text and "告警 6" not in text
     assert "其余 2 条" in text
     assert "只列前 5 条" in text
@@ -957,6 +978,7 @@ def test_report_header_states_the_actual_generating_call(fake_full_output):
 def test_report_rejects_tracks_without_long_tracks(fake_full_output):
     """全长度 1 的 track 说明时间编码失效：报告不许把它当成正常结果写出去。"""
     tracks = pd.read_csv(fake_full_output / "analysis" / "tracks.csv")
+    # 每个实例各自一轨：track 长度全是 1，等于时间编码（跨帧关联）已经失效。
     tracks["track_id"] = range(len(tracks))
     tracks.to_csv(fake_full_output / "analysis" / "tracks.csv", index=False)
     with pytest.raises(RuntimeError, match="长度"):
@@ -977,6 +999,7 @@ def _stub(name: str, calls: list[str], *, boom: bool = False, touch: Path | None
     """造一个记录调用顺序的假阶段；`boom=True` 时抛异常（模拟真实数据上的阶段失败）。"""
 
     def _run(*args, **kwargs):
+        """记录调用顺序（可选 touch 落标记文件），`boom=True` 时抛异常；返回 None。"""
         calls.append(name)
         if touch is not None:
             touch.parent.mkdir(parents=True, exist_ok=True)
@@ -998,11 +1021,13 @@ def test_run_all_calls_stages_in_order_and_writes_logs(fake_full_output, monkeyp
     temporal_dirs: list[tuple[Path, Path]] = []
 
     def fake_static(analysis_dir, outdir, **kwargs):
+        """stub 静态图阶段：记录调用并把 (analysis_dir, outdir) 收起来供断言，返回空列表。"""
         calls.append("render_static")
         static_dirs.append((Path(analysis_dir), Path(outdir)))
         return []
 
     def fake_temporal(analysis_dir, outdir=None):
+        """stub 时间图阶段：记录调用与实参 (analysis_dir, outdir)，返回空列表。"""
         calls.append("render_temporal")
         temporal_dirs.append((Path(analysis_dir), Path(outdir)))
         return []
@@ -1052,6 +1077,7 @@ def test_run_all_calls_stages_in_order_and_writes_logs(fake_full_output, monkeyp
         "stage7_static_figures",
         "stage7_temporal_figures",
     }
+    # 只要求非负：耗时是真实计时，测试不能钉死具体数值。
     assert timing["total_seconds"] >= 0.0
 
 
@@ -1068,6 +1094,7 @@ def test_run_all_stops_on_stage_failure(fake_full_output, monkeypatch):
 
     with pytest.raises(RuntimeError, match="stage3_preprocess"):
         pipeline.run_all()
+    # stage3 炸了：它后面的 stage4…render_temporal 一个都不许被调用。
     assert calls == ["run_stage1", "run_stage2", "run_stage3"]
     assert not report_path.exists()
     # 失败也要留下耗时记录（在哪一步停的），否则事后无法判断跑了多久
@@ -1090,6 +1117,7 @@ def test_run_all_writes_report_from_real_artifacts(fake_full_output, monkeypatch
 
     path = pipeline.run_all()
     text = _text(path)
+    # 没 stub write_report：6741 与“匹配率”只能来自刚读的合成产物。
     assert "6741" in text and "匹配率" in text
     assert "运行耗时" in text
     # 由 run_all 生成时必须如实说是“最后一个阶段”，而不是“直接调用报告函数”
@@ -1107,6 +1135,7 @@ def test_run_all_records_report_as_failed_stage(fake_full_output, monkeypatch):
     monkeypatch.setattr(pipeline, "render_temporal", lambda *a, **k: [])
 
     def boom(*args, **kwargs):
+        """stub `write_report`：只抛异常，用来验证失败被记成 failed_stage="report"。"""
         raise RuntimeError("报告写盘炸了")
 
     monkeypatch.setattr(pipeline, "write_report", boom)

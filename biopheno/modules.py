@@ -44,9 +44,9 @@ from typing import NoReturn
 
 import numpy as np
 import pandas as pd
-from SPOT.Analysis import sam_analysis as sam
 
 from biopheno import config as cfg
+from SPOT.Analysis import sam_analysis as sam
 
 # —— 输入产物（Stage 3 / Stage 2 / Stage 1 的落盘位置，与 preprocess.py / features.py / instances.py 一致）——
 # 行身份（实例顺序）来自 Stage 2 自己的产物，不是 Stage 1 的 all_instances.csv：

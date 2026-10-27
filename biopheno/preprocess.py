@@ -33,9 +33,9 @@ from typing import NoReturn
 
 import numpy as np
 import pandas as pd
-from SPOT.Analysis import preprocessing as spot_prep
 
 from biopheno import config as cfg
+from SPOT.Analysis import preprocessing as spot_prep
 
 # 落盘目录与文件名（Spec §6-Stage3）。Stage 3 只读 Stage 2 的产物，自己不重算特征。
 _FEATURES_SUBDIR: str = "features"

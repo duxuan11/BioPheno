@@ -19,11 +19,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from skimage import exposure
-from SPOT.Analysis import preprocessing
-from SPOT.Features import features as spot_features
 
 from biopheno import config as cfg
 from biopheno import instances as inst
+from SPOT.Analysis import preprocessing
+from SPOT.Features import features as spot_features
 
 # 落盘目录与文件名（Spec §6-Stage2-3）。
 _FEATURES_SUBDIR: str = "features"

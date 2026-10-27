@@ -184,16 +184,19 @@ def _tracks_with_sequences(sequences: dict[str, list[int]]) -> tuple[pd.DataFram
 
 
 def test_proportions_sum_to_one_per_time_and_condition():
+    """守口径：单个 (条件, 时间箱) 内的簇占比行和为 1，标签与条件名按升序返回。"""
     clusters = np.array([1, 1, 2, 2, 1, 2])
     times = np.array([0.0, 0.0, 0.0, 72.0, 72.0, 72.0])
     conds = np.array(["A1"] * 6)
     props, uniq_labels, uniq_cond = tstat.cluster_proportions(clusters, times, conds, time_intervals=[0.0, 72.0])
+    # 只有 A1 一个条件，所以条件轴长度为 1（3 个簇里只用到 1 和 2）
     assert props.shape[0] == 1
     assert np.allclose(props.sum(axis=-1), 1.0, atol=1e-6)
     assert list(uniq_labels) == [1, 2] and list(uniq_cond) == ["A1"]
 
 
 def test_proportions_axes_are_condition_bin_cluster():
+    """守口径：占比数组轴序必须是 (条件, 时间箱, 簇)，每个 (条件, 箱) 独立归一。"""
     clusters, times, conditions = _two_condition_bins()
     props, uniq_labels, uniq_cond = tstat.cluster_proportions(
         clusters, times, conditions, time_intervals=[0.0, 1.0, 2.0]
@@ -212,6 +215,7 @@ def test_proportions_axes_are_condition_bin_cluster():
 
 
 def test_proportions_reject_objects_exactly_on_interior_bin_edge():
+    """守边界：样本正好压在内部箱边界（t == 72）时必须抛 ValueError，不能被两个箱各算一次。"""
     # SPOT 的选择是两端闭区间（t >= lo 且 t <= hi），落在内部边界上的样本会被两个箱各算一次
     clusters = np.array([1, 2, 1, 2])
     times = np.array([0.0, 72.0, 72.0, 120.0])
@@ -221,6 +225,7 @@ def test_proportions_reject_objects_exactly_on_interior_bin_edge():
 
 
 def test_proportions_empty_bin_is_nan_and_still_row_stochastic_elsewhere():
+    """守语义：空箱的占比必须是 nan（缺数据 ≠ 占比 0），有数据的箱仍行和为 1。"""
     # A2 只出现在第二个时间箱：第一个箱的占比必须是 nan（缺数据），不能悄悄填 0
     clusters = np.array([1, 2, 2, 1])
     times = np.array([0.5, 0.5, 1.5, 1.5])
@@ -235,6 +240,7 @@ def test_proportions_empty_bin_is_nan_and_still_row_stochastic_elsewhere():
 
 
 def test_transitions_are_row_stochastic():
+    """守契约：转移矩阵每行是一个条件分布，行和恒为 1。"""
     tracks = pd.DataFrame(
         {
             "spot_uid": ["A1_0_0", "A1_0_1", "A2_0_0", "A2_0_1"],
@@ -245,10 +251,12 @@ def test_transitions_are_row_stochastic():
     )
     clusters = np.array([1, 2, 1, 1])
     out = tstat.transitions(tracks, clusters)
+    # 两条两帧 track（1→2、1→1）；这里只守行和，不看具体概率值
     assert np.allclose(out["inter"].sum(axis=1), 1.0, atol=1e-6)
 
 
 def test_transitions_matrix_is_source_by_target():
+    """守口径：probs 行=来源、列=目标；非对称轨迹下转置后行和不再为 1，朝向错了必挂。"""
     # 只观测到 1→1、1→2、2→2（A1/A2 各一条两帧 track，A3 一条 2→2）：非对称，能钉死朝向
     tracks, clusters = _tracks_with_sequences({"A1": [1, 1], "A2": [1, 2], "A3": [2, 2]})
     out = tstat.transitions(tracks, clusters)
@@ -265,6 +273,7 @@ def test_transitions_matrix_is_source_by_target():
 
 
 def test_transitions_graph_data_is_json_serializable_and_keeps_asymmetric_edges():
+    """守产物：inter_graph_data 可 JSON 序列化，边与 inter 一致并带 count / prior_only / n_obs_out。"""
     tracks, clusters = _tracks_with_sequences({"A1": [1, 1], "A2": [1, 2], "A3": [2, 2]})
     out = tstat.transitions(tracks, clusters)
     graph = out["inter_graph_data"]
@@ -285,6 +294,7 @@ def test_transitions_graph_data_is_json_serializable_and_keeps_asymmetric_edges(
 
 
 def test_transitions_flags_prior_only_edges_and_zero_observation_rows():
+    """守语义：零观测出边的行平滑后是均匀 1/(K-1)，但每条边 count==0 且 prior_only=True。"""
     # 簇 3 只在最后一次采样出现：它作为来源从未被观测到，平滑后整行变成均匀的 1/(K-1)
     tracks, clusters = _tracks_with_sequences({"A1": [1, 2, 2], "A2": [1, 2, 3]})
     out = tstat.transitions(tracks, clusters)
@@ -307,6 +317,7 @@ def test_transitions_flags_prior_only_edges_and_zero_observation_rows():
 
 
 def test_transitions_per_condition_counts_mark_all_prior_condition():
+    """守语义：逐条件原始计数落进 counts_by_condition，让“整份矩阵全来自先验”可从产物本身识别。"""
     # A2 只有一条长度 1 的 track：该条件没有任何相邻采样点对，矩阵完全来自先验
     tracks, clusters = _tracks_with_sequences({"A1": [1, 2], "A2": [2]})
     out = tstat.transitions(tracks, clusters)
@@ -328,6 +339,7 @@ def test_transitions_per_condition_counts_mark_all_prior_condition():
 
 
 def test_transitions_count_singleton_tracks_but_they_produce_no_pairs():
+    """守边界：长度 1 的段计入 QC 的实例/段数，但不产生任何转移对。"""
     tracks, clusters = _tracks_with_sequences({"A1": [1, 2]})
     singleton = tracks.iloc[[1]].copy()
     singleton["instance_uid"] = "A2_0_0"
@@ -348,6 +360,7 @@ def test_transitions_count_singleton_tracks_but_they_produce_no_pairs():
 
 
 def test_transitions_qc_counts_segments_and_tracks_separately():
+    """守口径：帧号断档让同一 track 被切成两段，n_tracks 与 n_spot_segments 必须分开记。"""
     # 同一 track 的帧号断档（0 → 2）会被 SPOT 切成两段：段数 2，但 track 数仍是 1
     tracks = pd.DataFrame(
         {
@@ -366,6 +379,7 @@ def test_transitions_qc_counts_segments_and_tracks_separately():
 
 
 def test_transitions_with_single_cluster_does_not_crash():
+    """守退化：只有 1 个簇时不崩，inter 是 1×1 全 nan（无簇间转移可言），self 为 1。"""
     tracks, clusters = _tracks_with_sequences({"A1": [1, 1]})
     out = tstat.transitions(tracks, clusters)
     assert out["inter"].shape == (1, 1)
@@ -377,6 +391,7 @@ def test_transitions_with_single_cluster_does_not_crash():
 
 
 def _fake_temporal_inputs(root):
+    """造 Stage6 时间统计的输入：返回 (三份表, 嵌入, 分析时间, 条件=fov, 簇标签)，逐行按 uid 对齐。"""
     frames = _fake_analysis(root)
     merged = frames["labels"].merge(frames["umap"], on="instance_uid", how="inner")
     embedding = merged[["umap_1", "umap_2"]].to_numpy(dtype=float)
@@ -387,9 +402,11 @@ def _fake_temporal_inputs(root):
 
 
 def test_phenotype_trajectories_use_density_path_on_separated_blobs(tmp_path):
+    """守主路径：三个分开的团走 SPOT 密度法（path=spot_density），轨迹全有限且单调右移。"""
     _, embedding, times, conditions, _ = _fake_temporal_inputs(tmp_path)
     out = tstat.phenotype_trajectories(embedding, times, conditions, time_intervals=[0.0, 1.0, 2.0, 3.0])
     assert out["path"] == "spot_density"
+    # 形状 (条件, 时间箱, 2)：3 视野 × 3 箱 × (umap_1, umap_2)，搞反会画错轴
     assert out["trajectories"].shape == (3, 3, 2)
     assert np.all(np.isfinite(out["trajectories"]))
     assert list(out["conditions"]) == ["A1", "A2", "A3"]
@@ -398,9 +415,11 @@ def test_phenotype_trajectories_use_density_path_on_separated_blobs(tmp_path):
 
 
 def test_phenotype_trajectories_fall_back_to_cluster_centroid_weighting(tmp_path, monkeypatch):
+    """守退化：密度法全 nan 时退到簇质心按占比加权，并分别记录被拒输出与落盘轨迹的有限性。"""
     _, embedding, times, conditions, clusters = _fake_temporal_inputs(tmp_path)
 
     def _empty_selection(*args, **kwargs):
+        """stub：冒充 SPOT 的密度法返回空选择（全 nan 轨迹 + 三个空索引列表）。"""
         return np.full((3, 3, 2), np.nan), [[], [], []]
 
     monkeypatch.setattr(tstat.sam, "compute_phenotypic_trajectory", _empty_selection)
@@ -424,12 +443,14 @@ def test_phenotype_trajectories_fall_back_to_cluster_centroid_weighting(tmp_path
 
 
 def test_fallback_trajectories_rejects_mismatched_cluster_order(monkeypatch):
+    """守一致性：cluster_proportions 返回的簇顺序与传入簇数组对不上时必须抛 RuntimeError。"""
     times = np.array([0.5, 0.5, 1.5, 1.5])
     conditions = np.array(["A1"] * 4)
     clusters = np.array([1, 2, 1, 2])
     embedding = np.zeros((4, 2))
 
     def _reordered(clusters, time_hours, conditions, time_intervals):
+        """stub：返回被重排的簇顺序 [2, 1]，模拟占比轴与簇数组下标错位。"""
         return np.ones((1, 2, 2)), np.array([2, 1]), np.array(["A1"])
 
     monkeypatch.setattr(tstat, "cluster_proportions", _reordered)
@@ -440,6 +461,7 @@ def test_fallback_trajectories_rejects_mismatched_cluster_order(monkeypatch):
 
 
 def test_degeneracy_makes_one_collapsed_condition_visible():
+    """守逐条件可见：只有一个条件塌缩成点时，degenerate 与 collapsed_conditions 必须点名 A1。"""
     trajectories = np.array(
         [
             [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],  # A1 塌缩成一个点
@@ -457,6 +479,7 @@ def test_degeneracy_makes_one_collapsed_condition_visible():
 
 
 def test_degeneracy_makes_nan_step_visible():
+    """守逐条件可见：中间箱选空的 nan 步必须同时给出 n_nan_steps 与逐箱有限性。"""
     trajectories = np.array(
         [
             [[0.0, 0.0], [np.nan, np.nan], [6.0, 0.0]],  # A1 中间箱选空
@@ -467,15 +490,18 @@ def test_degeneracy_makes_nan_step_visible():
     assert info["degenerate"] is True
     # nansum 会把 nan 步当作 0，所以必须同时给出 nan 步数与逐箱有限性
     assert info["n_nan_steps"] == [2, 0]
+    # 两个相邻步都跨过 nan 箱：步长是 None（未定义），不能被 nansum 抹成 0
     assert info["step_lengths"][0] == [None, None]
     assert info["finite_bins"][0] == [True, False, True]
     assert any("nan" in reason for reason in info["reasons"])
 
 
 def test_phenotype_trajectories_falls_back_to_bin_centroid_without_clusters(tmp_path, monkeypatch):
+    """守退化：没给 clusters 时退到箱内实例质心（path=bin_centroid），轨迹仍全有限。"""
     _, embedding, times, conditions, _ = _fake_temporal_inputs(tmp_path)
 
     def _empty_selection(*args, **kwargs):
+        """stub：同上，冒充 SPOT 密度法返回空选择。"""
         return np.full((3, 3, 2), np.nan), [[], [], []]
 
     monkeypatch.setattr(tstat.sam, "compute_phenotypic_trajectory", _empty_selection)
@@ -485,9 +511,11 @@ def test_phenotype_trajectories_falls_back_to_bin_centroid_without_clusters(tmp_
 
 
 def test_phenotype_trajectories_falls_back_when_trajectory_collapses(tmp_path, monkeypatch):
+    """守退化：SPOT 返回全零（轨迹塌缩）时必须被替换掉，并标 degenerate=True。"""
     _, embedding, times, conditions, _ = _fake_temporal_inputs(tmp_path)
 
     def _collapsed(*args, **kwargs):
+        """stub：冒充 SPOT 返回塌缩到原点的轨迹（全 0）与空索引列表。"""
         return np.zeros((3, 3, 2)), [[], [], []]
 
     monkeypatch.setattr(tstat.sam, "compute_phenotypic_trajectory", _collapsed)
@@ -501,6 +529,7 @@ def test_phenotype_trajectories_falls_back_when_trajectory_collapses(tmp_path, m
 
 
 def test_trajectory_affinity_is_symmetric_with_unit_diagonal(tmp_path):
+    """守性质：亲和矩阵对称、对角为 1、取值落在 [0, 1]，标签顺序与条件顺序一致。"""
     _, embedding, times, conditions, _ = _fake_temporal_inputs(tmp_path)
     out = tstat.phenotype_trajectories(embedding, times, conditions, time_intervals=[0.0, 1.0, 2.0, 3.0])
     affinity, labels = tstat.trajectory_affinity(out)
@@ -508,10 +537,12 @@ def test_trajectory_affinity_is_symmetric_with_unit_diagonal(tmp_path):
     assert affinity.shape == (3, 3)
     assert np.allclose(affinity, affinity.T)
     assert np.allclose(np.diag(affinity), 1.0)
+    # 亲和度是相似度：越出 [0, 1] 说明归一化算错了，下游热图与 clustermap 都会失真
     assert np.all((affinity >= 0.0) & (affinity <= 1.0))
 
 
 def test_trajectory_affinity_surfaces_fallback_to_callers():
+    """守退化：轨迹全同时 DTW 距离 std=0，退到全 1 矩阵并通过 return_meta 报出原因。"""
     # 三条轨迹完全相同 → 两两 DTW 距离全 0 → std = 0 → exp(-d / std) 无定义，只能退到全 1
     identical = {"trajectories": np.zeros((3, 3, 2)), "conditions": ["A1", "A2", "A3"]}
     affinity, labels, info = tstat.trajectory_affinity(identical, return_meta=True)
@@ -525,7 +556,10 @@ def test_trajectory_affinity_surfaces_fallback_to_callers():
 
 
 def test_trajectory_clusters_falls_back_when_hcluster_raises(monkeypatch):
+    """守鲁棒性：hcluster 抛错时退到原始条件顺序、记下 fallback 原因，且不留下 figure。"""
+
     def _boom(*args, **kwargs):
+        """stub：冒充 SPOT 的 hcluster，调用即抛 RuntimeError。"""
         raise RuntimeError("seaborn 挂了")
 
     monkeypatch.setattr(tstat.sam, "hcluster_phenotypic_trajectory_affinity_matrix", _boom)
@@ -541,6 +575,7 @@ def test_trajectory_clusters_falls_back_when_hcluster_raises(monkeypatch):
 
 
 def test_trajectory_clusters_returns_permutation_and_closes_figures(tmp_path):
+    """守口径：order 是条件顺序的置换、conditions 是重排后的名字，figure 必须被关掉。"""
     _, embedding, times, conditions, _ = _fake_temporal_inputs(tmp_path)
     out = tstat.phenotype_trajectories(embedding, times, conditions, time_intervals=[0.0, 1.0, 2.0, 3.0])
     affinity, labels = tstat.trajectory_affinity(out)
@@ -556,6 +591,7 @@ def test_trajectory_clusters_returns_permutation_and_closes_figures(tmp_path):
 
 
 def test_run_stage6b_writes_four_artifacts_with_their_label_ordering(tmp_path, monkeypatch):
+    """守产物：四份 npz + stage6b_qc.json 都落盘，且各自带簇顺序、fov 名与 bin→day 映射。"""
     _fake_analysis(tmp_path)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
 
@@ -596,6 +632,7 @@ def test_run_stage6b_writes_four_artifacts_with_their_label_ordering(tmp_path, m
 
 
 def test_run_stage6b_keeps_singleton_tracks_in_proportions(tmp_path, monkeypatch):
+    """守边界：长度 1 的 track 算进占比与 QC 的实例/段数，但不产生转移。"""
     frames = _fake_analysis(tmp_path, singleton_track=True)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
 
@@ -613,6 +650,7 @@ def test_run_stage6b_keeps_singleton_tracks_in_proportions(tmp_path, monkeypatch
 
 
 def test_run_stage6b_persists_counts_offset_and_shipped_finiteness(tmp_path, monkeypatch):
+    """守产物：分析时间偏移、落盘轨迹有限性、边的计数与先验标记都要进 npz 与 QC。"""
     _fake_analysis(tmp_path)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
 
@@ -644,11 +682,13 @@ def test_run_stage6b_persists_counts_offset_and_shipped_finiteness(tmp_path, mon
 
 
 def test_run_stage6b_rejects_duplicate_instance_uid(tmp_path, monkeypatch):
+    """守入口：cluster_labels.csv / umap_2d.csv 里 instance_uid 重复时报错并点名文件。"""
     _fake_analysis(tmp_path)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     for filename in ("cluster_labels.csv", "umap_2d.csv"):
         path = tmp_path / "analysis" / filename
         table = pd.read_csv(path)
+        # 复制首行制造重复 uid，逐份文件单独污染，确认报错信息点名的是哪一份
         pd.concat([table, table.iloc[[0]]], ignore_index=True).to_csv(path, index=False)
         with pytest.raises(RuntimeError, match=f"{filename} 里 instance_uid 有重复"):
             tstat.run_stage6b()
@@ -657,6 +697,7 @@ def test_run_stage6b_rejects_duplicate_instance_uid(tmp_path, monkeypatch):
 
 
 def test_run_stage6b_requires_upstream_artifacts(tmp_path, monkeypatch):
+    """守入口：缺 tracks.csv / cluster_labels.csv 时抛 RuntimeError 并点名缺的文件。"""
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     with pytest.raises(RuntimeError, match="tracks.csv"):
         tstat.run_stage6b()

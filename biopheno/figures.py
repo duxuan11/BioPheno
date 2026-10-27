@@ -95,11 +95,11 @@ from matplotlib.lines import Line2D
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.ndimage import gaussian_filter
 from scipy.spatial.distance import squareform
-from SPOT.Analysis import sam_analysis as sam
 
 from biopheno import config as cfg
 from biopheno import modules as mods
 from biopheno import temporal_stats as tstats
+from SPOT.Analysis import sam_analysis as sam
 
 # —— 输入产物（与 Stage1/3/4/5 的落盘位置一致；根目录由调用方给）——
 _ANALYSIS_SUBDIR: str = "analysis"

@@ -67,10 +67,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from SPOT.Registration import registration_2D as r2d
 
 from biopheno import config as cfg
 from biopheno import instances as inst
+from SPOT.Registration import registration_2D as r2d
 
 # —— 上游产物（Stage 1 的汇总表；掩码图仍从 DATA_ROOT 按约定路径读）——
 _INSTANCES_SUBDIR: str = "instances"
@@ -507,6 +507,7 @@ def _match_frames_with_stats(
     stats["n_candidates"] = len(prev_idx)
 
     def _record(k: int, event: str) -> dict:
+        """把第 k 个候选对打包成一条匹配记录（event 为 one_to_one / merge 等），键名即落盘列名。"""
         return {
             "prev_idx": int(prev_idx[k]),
             "cur_idx": int(cur_idx[k]),
@@ -547,6 +548,7 @@ def _match_frames_with_stats(
 
         # 幸存父实例取面积最大者、同面积取 uid 小者：合并后的实例形态主要由大的那颗决定
         def _parent_key(index: int) -> tuple[float, str]:
+            """幸存父实例的排序键：面积降序、同面积取 uid 升序（合并后形态主要由面积大的那颗决定）。"""
             return (-float(area[index]), str(prev_uid[index]))
 
         pair_index: dict[tuple[int, int], int] = {
@@ -727,12 +729,14 @@ def assign_tracks(matches: list[pd.DataFrame], all_meta: pd.DataFrame) -> pd.Dat
     parent = np.arange(len(uids))
 
     def find(index: int) -> int:
+        """并查集查找 + 路径减半：返回 index 所在集合的根，即该轨迹的合并代表。"""
         while parent[index] != index:
             parent[index] = parent[parent[index]]  # 路径减半
             index = int(parent[index])
         return index
 
     def union(a: int, b: int) -> None:
+        """并查集合并：把两个根里编号大的挂到编号小的下面，保证同一批 match 表合并结果确定。"""
         root_a, root_b = find(a), find(b)
         if root_a != root_b:
             parent[max(root_a, root_b)] = min(root_a, root_b)  # 小根当根，保证确定性

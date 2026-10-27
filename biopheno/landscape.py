@@ -61,9 +61,9 @@ import pandas as pd
 import umap
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-from SPOT.Analysis import sam_analysis as sam
 
 from biopheno import config as cfg
+from SPOT.Analysis import sam_analysis as sam
 
 # —— 输入产物（与 preprocess.py / features.py / instances.py 的落盘位置一致）——
 _PREPROCESSED_SUBDIR: str = "preprocessed"

@@ -33,9 +33,7 @@ def add_input_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def configure_from_args(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> input_mod.Dataset | None:
+def configure_from_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> input_mod.Dataset | None:
     """按命令行参数写好 `config`，并把"读的是哪两个目录、认出几个采样点"打到控制台。
 
     - 两个输入目录都没给：返回 None（保持旧约定）；只给了 `--output` 就只改输出根。

@@ -268,12 +268,7 @@ def available_frames(days: list[str] | None = None, fovs: list[str] | None = Non
     day_list = list(days) if days is not None else list(cfg.DAYS)
     fov_list = list(fovs) if fovs is not None else list(cfg.FOVS)
     if cfg.INPUT_FILES:
-        return [
-            (str(day), str(fov))
-            for day in day_list
-            for fov in fov_list
-            if (str(day), str(fov)) in cfg.INPUT_FILES
-        ]
+        return [(str(day), str(fov)) for day in day_list for fov in fov_list if (str(day), str(fov)) in cfg.INPUT_FILES]
     return [(str(day), str(fov)) for day in day_list for fov in fov_list]
 
 

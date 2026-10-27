@@ -12,10 +12,10 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
-from SPOT.Analysis import preprocessing as spot_prep
 
 from biopheno import config as cfg
 from biopheno import preprocess as prep
+from SPOT.Analysis import preprocessing as spot_prep
 
 # 剔除原因类别（与实现的 `_DROP_CATEGORIES` 同名）：QC 的不变量要能被独立复核
 _DROP_CATEGORY_KEYS = (
@@ -28,12 +28,14 @@ _DROP_CATEGORY_KEYS = (
 
 
 def test_global_scaling_keeps_between_day_difference():
+    """守口径：StandardScaler 只能全局拟合一次，天间均值差不能被按天拆分抹平。"""
     # 若 all_conditions 误传 day，两组会被各自 z-score，天间均值差会被抹平。
     rng = np.random.default_rng(0)
     X = np.vstack([rng.normal(0, 1, size=(50, 8)), rng.normal(3, 1, size=(50, 8))])
     names = [f"f{i}" for i in range(8)]
     Xp, kept, info = prep.preprocess(X, names)
     gap = abs(Xp[:50].mean() - Xp[50:].mean())
+    # 原始均值差约 3、全局 std 约 1.9，全局拟合后 gap 仍应远大于 0.5；按天拆分则 gap ≈ 0。
     assert gap > 0.5, "天间差异被抹平：all_conditions 很可能被按天拆分了"
     # 全局拟合不会让列数或列名发生变化（只剩等权缩放）
     assert kept == names
@@ -41,6 +43,7 @@ def test_global_scaling_keeps_between_day_difference():
 
 
 def test_nan_motion_columns_are_dropped_and_recorded():
+    """守契约：全 NaN 与部分 NaN 的 motion 列都被剔除，并各自记进对应的剔除原因清单。"""
     # 契约测试（取自任务说明）。构造被刻意加强：a/b/c 三列**真的在变**（若是常数会被第 1 步剔掉，
     # 后面的有限性/无 motion 断言就全是空转了）；两个 motion 列一个是全 NaN、一个是部分 NaN，
     # 这样“只删全 NaN 列”（第 2 步的窄化实现）或“删掉第 3 步”都会被抓住。
@@ -63,6 +66,7 @@ def test_nan_motion_columns_are_dropped_and_recorded():
 
 
 def test_drop_categories_partition_the_dropped_columns(monkeypatch):
+    """守不变量：五类剔除原因互斥，并集恰好等于被剔除的全部列，且与保留列不交。"""
     # 不变量：五个“原因”清单互斥，并集恰好等于被剔除的全部列；n_dropped_features 只由维度相减得出。
     # 用 σ=0 把高方差阈值钉成“均值 std”，让尖刺列被确定地剔掉（不靠随机数值巧合）。
     monkeypatch.setattr(cfg, "VARIANCE_THRESHOLD_SIGMA", 0.0)
@@ -112,17 +116,20 @@ def test_drop_categories_partition_the_dropped_columns(monkeypatch):
         assert info[f"n_{category}"] == len(info[category])
     # 各步口径与原因口径正交：每列只在某一步被删一次，所以合计也等于实际剔除数
     assert sum(info["n_dropped_per_step"].values()) == info["n_dropped_features"]
+    # 全 NaN、部分 NaN、含 Inf 三列都是在第 2 步因 std=NaN 出局，所以这一步恰好剔 3 列。
     assert info["n_dropped_per_step"]["remove_nan_variance_features"] == 3
     assert info["n_dropped_per_step"]["remove_non_finite_features"] == 0
 
 
 def test_non_finite_guard_is_idempotent_after_step2(monkeypatch):
+    """守边界：第 2 步因 std=NaN 已清走非有限列，第 3 步安全网实际剔除 0 列。"""
     # 第 3 步是安全网：含 NaN/±Inf 的列在第 2 步就因为 std=NaN 出局了，所以第 3 步实际剔除 0 列。
     # 用 spy 直接看第 2 步的**输出**：它已经全有限，这就是“第 3 步无活可干”的事实依据。
     seen: dict = {}
     real = spot_prep.remove_nan_variance_features
 
     def _spy(X, names, return_index=False):
+        """包一层记录第 2 步输出的列名与是否全有限，然后原样返回结果。"""
         out = real(X, names, return_index=return_index)
         seen["all_finite"] = bool(np.isfinite(out[0]).all())
         seen["names"] = [str(name) for name in out[1]]
@@ -146,6 +153,7 @@ def test_non_finite_guard_is_idempotent_after_step2(monkeypatch):
 
 
 def test_non_finite_guard_drops_non_finite_columns_when_handed_them():
+    """守口径：单独喂给 _drop_non_finite 非有限列时必须真删，且对干净矩阵再跑一次幂等。"""
     # 直接单测第 3 步：正常路径上它没有活可干，但拿到非有限列时它必须真的删。
     X = np.array([[1.0, np.nan, np.inf, 4.0], [2.0, 3.0, 5.0, 6.0]])
     names = np.array(["a", "b", "c", "d"], dtype=str)
@@ -162,6 +170,7 @@ def test_non_finite_guard_drops_non_finite_columns_when_handed_them():
 
 
 def test_mandated_step_order_is_pinned(monkeypatch):
+    """守口径：七步顺序被钉死，尤其是曲率尺度归必须在 power transform 之前。"""
     # 顺序是硬约束（曲率尺度归一必须作用在**原始量纲**上，power transform 之后 diameter 已被 z-score，
     # 再乘就错了）。这里把七步依次包一层记录调用顺序。
     calls: list[str] = []
@@ -178,7 +187,10 @@ def test_mandated_step_order_is_pinned(monkeypatch):
     )
 
     def _wrap(label, fn):
+        """把 fn 包成「先记录 label 再调用原函数」的记录器。"""
+
         def _recorder(*args, **kwargs):
+            """记录本次调用标签，然后转交原函数。"""
             calls.append(label)
             return fn(*args, **kwargs)
 
@@ -203,6 +215,7 @@ def test_mandated_step_order_is_pinned(monkeypatch):
 
 
 def test_info_records_dropped_names_and_final_dims():
+    """守口径：QC 的剔除名字、个数与最终维度三者自洽，且与 kept 列名一致。"""
     # 零值列被第一步剔除；记账要给出名字与个数，且最终维度与 kept 一致。
     rng = np.random.default_rng(1)
     X = np.hstack([rng.normal(size=(60, 5)), np.zeros((60, 1))])
@@ -223,6 +236,7 @@ def test_info_records_dropped_names_and_final_dims():
 
 
 def test_curvature_features_are_scaled_by_equivalent_diameter():
+    """守口径：curvature 列乘等效直径，等效直径与 area 等非 curvature 列原样不动。"""
     # 曲率量纲是 length^-1，SPOT 的尺寸归一就是乘等效直径；非 curvature 列必须原样保留。
     X = np.array([[2.0, 3.0, 5.0], [4.0, 0.5, 7.0]])
     names = np.array(["equivalent_diameter", "mean_curvature", "area"], dtype=str)
@@ -235,6 +249,7 @@ def test_curvature_features_are_scaled_by_equivalent_diameter():
 
 
 def test_curvature_scaling_requires_equivalent_diameter():
+    """守边界：有 curvature 列却缺 equivalent_diameter 时报带中文上下文的 ValueError。"""
     # 有 curvature 列却没有 equivalent_diameter 时，上游会拿空索引做广播，抛一句看不出原因的
     # numpy 错误；必须先自查并给中文上下文。
     X = np.ones((4, 2))
@@ -244,11 +259,13 @@ def test_curvature_scaling_requires_equivalent_diameter():
 
 
 def test_power_transform_is_fitted_on_one_global_condition(monkeypatch):
+    """守口径：传给 power transform 的 all_conditions 必须是单一常量，才算全局拟合一次。"""
     # 与契约测试互补：直接盯住 all_conditions 的取值，单一常量才算"全局拟合一次"。
     seen = {}
     real = spot_prep.power_transform_and_scale_features
 
     def _spy(X, names, all_conditions):
+        """拦截 power transform 调用，抄下传入的 all_conditions 再原样转交。"""
         seen["conditions"] = np.asarray(all_conditions).copy()
         return real(X, names, all_conditions)
 
@@ -259,10 +276,12 @@ def test_power_transform_is_fitted_on_one_global_condition(monkeypatch):
     conditions = seen["conditions"]
     assert len(conditions) == 40
     assert np.unique(conditions).size == 1
+    # 常量取 0（而不是 day 名或递增值）才说明实现真的只喂了一个 condition。
     assert np.all(conditions == 0)
 
 
 def test_high_variance_threshold_comes_from_config(monkeypatch):
+    """守口径：高方差阈值读 cfg.VARIANCE_THRESHOLD_SIGMA，阈值极低时全部列都被剔除。"""
     # 阈值必须读 cfg（论文用 2 sigma），且要按名字记账；把阈值调到远低于任何 std 时所有列都该被扔掉。
     monkeypatch.setattr(cfg, "VARIANCE_THRESHOLD_SIGMA", -100.0)
     rng = np.random.default_rng(3)
@@ -276,6 +295,7 @@ def test_high_variance_threshold_comes_from_config(monkeypatch):
 
 
 def test_weighting_equalises_total_variance_per_feature_set():
+    """守口径：SAM 特征族等权后每个 feature set 的总方差都等于 1，与家族列数无关。"""
     # shape 有 4 列、appearance 只有 2 列：等权之后两个 set 的总方差都应等于 1，
     # 这样列多的家族不会仅凭列数主导距离。
     rng = np.random.default_rng(4)
@@ -292,6 +312,7 @@ def test_weighting_equalises_total_variance_per_feature_set():
 
 
 def test_preprocess_rejects_names_that_disagree_with_columns():
+    """守边界：特征名个数与矩阵列数不一致时立即 ValueError，不进入后续步骤。"""
     with pytest.raises(ValueError, match="特征名"):
         prep.preprocess(np.ones((5, 3)), ["a", "b"])
 
@@ -306,6 +327,7 @@ def _write_features(root, names, X):
 
 
 def _synthetic_feature_table(seed=0, n=60):
+    """造一份形如 Stage 2 产物的合成表：返回 10 个特征名与 (n, 10) 矩阵，末尾 2 列是全 NaN 的 motion 占位。"""
     rng = np.random.default_rng(seed)
     names = [
         "equivalent_diameter",
@@ -324,6 +346,7 @@ def _synthetic_feature_table(seed=0, n=60):
 
 
 def test_run_stage3_writes_artifacts(monkeypatch, tmp_path):
+    """守口径：run_stage3 落盘四份产物，且矩阵维度、QC 记账与 motion 剔除三者一致。"""
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     names, X = _synthetic_feature_table()
     _write_features(tmp_path, names, X)
@@ -357,6 +380,7 @@ def test_run_stage3_writes_artifacts(monkeypatch, tmp_path):
 
 
 def test_run_stage3_prints_and_persists_high_variance_names(monkeypatch, tmp_path, capsys):
+    """守口径：高方差剔除的名字既打印到 stdout，也落进 stage3_qc.json，不能只留一处。"""
     # 高方差剔除删的是“有值且变异大”的列，最容易被忽略，所以名字必须打印出来（至少前 N 个）
     # 并落在 QC 里。σ=0 把阈值钉成“均值 std”，尖刺列被确定地剔掉。
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
@@ -375,6 +399,7 @@ def test_run_stage3_prints_and_persists_high_variance_names(monkeypatch, tmp_pat
 
 
 def test_run_stage3_reports_degenerate_drops_consistently(monkeypatch, tmp_path):
+    """守边界：所有列被剔完时报错，且错误里的合计剔除数与分类记账不自相矛盾。"""
     # 退化：所有列都被剔掉时，错误信息里的各步剔除数必须自洽（不能出现分类重复计数的和）。
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     monkeypatch.setattr(cfg, "VARIANCE_THRESHOLD_SIGMA", -100.0)
@@ -384,9 +409,11 @@ def test_run_stage3_reports_degenerate_drops_consistently(monkeypatch, tmp_path)
     with pytest.raises(ValueError, match="没有任何特征剩下") as excinfo:
         prep.run_stage3()
     assert "合计剔除了 10 列" in str(excinfo.value)
+    # 10 = 输入 10 列全被剔；这个数必须来自「输入维度 - 输出维度」，而不是把分类计数相加。
 
 
 def test_run_stage3_rejects_non_list_name_file(monkeypatch, tmp_path):
+    """守边界：feature_names.json 不是名字列表时给带上下文的中文 ValueError。"""
     # feature_names.json 被写成对象/标量时，迭代出来的是 dict 的键或直接崩；必须给带上下文的中文错误。
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     names, X = _synthetic_feature_table()
@@ -398,6 +425,7 @@ def test_run_stage3_rejects_non_list_name_file(monkeypatch, tmp_path):
 
 
 def test_run_stage3_wraps_csv_decode_error(monkeypatch, tmp_path):
+    """守边界：非 UTF-8 的 all_features.csv 要换成中文 ValueError，不能冒出裸 UnicodeDecodeError。"""
     # 非 UTF-8 的 CSV（二进制损坏/被别的编码重写过）不能冒出裸 UnicodeDecodeError。
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     outdir = tmp_path / "features"
@@ -409,6 +437,7 @@ def test_run_stage3_wraps_csv_decode_error(monkeypatch, tmp_path):
 
 
 def test_run_stage3_requires_stage2(monkeypatch, tmp_path):
+    """守边界：缺 Stage 2 产物时提示先跑 Stage 2，而不是冒出裸 FileNotFoundError。"""
     # 没有 all_features.csv 时不能冒出裸 FileNotFoundError，要说清"先跑 Stage 2"。
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     with pytest.raises(ValueError, match="Stage2") as excinfo:
@@ -417,6 +446,7 @@ def test_run_stage3_requires_stage2(monkeypatch, tmp_path):
 
 
 def test_run_stage3_rejects_stale_name_file(monkeypatch, tmp_path):
+    """守边界：列名清单与特征表对不上时拒绝，避免按名取列静默错位。"""
     # 列名清单与特征表的列对不上（Stage 2 中途被改过）时，按名取列会静默错位，必须拒绝。
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     names, X = _synthetic_feature_table()

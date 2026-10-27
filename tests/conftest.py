@@ -26,6 +26,7 @@ def make_mask_and_image():
     """
 
     def _make(n_blobs: int = 2, tiny_area: int | None = None, touch_border: bool = False):
+        """按上面的参数造一对 240×320 的 (uint8 亮度图, uint16 标签图) 并返回。"""
         h, w = 240, 320
         radius = 18
         rng = np.random.default_rng(0)
@@ -78,6 +79,7 @@ def _shift_labels(labels: np.ndarray, dy: int, dx: int) -> np.ndarray:
     """
     out = np.zeros_like(labels)
     h, w = labels.shape
+    # 越界部分靠切片夹掉、不留残余，模拟的是整幅掩码相对原图错位，而不是局部残缺。
     out[max(0, dy) : h - max(0, -dy), max(0, dx) : w - max(0, -dx)] = labels[
         max(0, -dy) : h - max(0, dy), max(0, -dx) : w - max(0, dx)
     ]

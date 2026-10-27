@@ -1256,9 +1256,7 @@ def _sampling_axis_note() -> str:
         if len({round(gap, 6) for gap in gaps}) > 1
         else "相邻采样点等间隔，转移矩阵与轨迹里的“一步”就是同一段真实时长。"
     )
-    return (
-        f"**只有 {len(days)} 个离散采样点**（{' / '.join(days)}，{hours_text} h），不是连续视频；{tail}"
-    )
+    return f"**只有 {len(days)} 个离散采样点**（{' / '.join(days)}，{hours_text} h），不是连续视频；{tail}"
 
 
 def _section_limitations(

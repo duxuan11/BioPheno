@@ -10,16 +10,19 @@ from biopheno import instances as inst
 
 
 def test_run_stage1_writes_catalogs_and_summary(monkeypatch, fake_dataset, tmp_path):
+    """守口径：跑完必须落盘每视野 instances.csv + 全局 all_instances.csv，且 uid 唯一。"""
     monkeypatch.setattr(cfg, "DATA_ROOT", fake_dataset)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     meta = inst.run_stage1(days=["day0", "day3"], fovs=["A1"])
     assert (tmp_path / "instances" / "day0" / "A1" / "instances.csv").exists()
     assert (tmp_path / "instances" / "all_instances.csv").exists()
     assert set(meta["day"]) == {"day0", "day3"}
+    # uid 重复会让下游按 uid 取 patch / 特征时静默串到别的实例上。
     assert meta["instance_uid"].is_unique
 
 
 def test_run_stage1_returns_dataframe_with_required_columns(monkeypatch, fake_dataset, tmp_path):
+    """守口径：返回值带齐下游 Stage 2/5/6 依赖的列，且与落盘 CSV 逐行一致。"""
     monkeypatch.setattr(cfg, "DATA_ROOT", fake_dataset)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     meta = inst.run_stage1(days=["day0", "day3"], fovs=["A1"])
@@ -34,6 +37,7 @@ def test_run_stage1_returns_dataframe_with_required_columns(monkeypatch, fake_da
 
 
 def test_run_stage1_writes_qc_summary(monkeypatch, fake_dataset, tmp_path):
+    """守口径：stage1_qc.json 逐 (day/fov) 记实例数、对齐偏移与小实例/丢弃轮廓计数。"""
     monkeypatch.setattr(cfg, "DATA_ROOT", fake_dataset)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     meta = inst.run_stage1(days=["day0", "day3"], fovs=["A1"])
@@ -45,11 +49,13 @@ def test_run_stage1_writes_qc_summary(monkeypatch, fake_dataset, tmp_path):
         # 对齐偏移必须落在 ±ALIGN_MAX_SHIFT_PX 内，且以整数记录
         assert abs(row["align_dy"]) <= cfg.ALIGN_MAX_SHIFT_PX
         assert abs(row["align_dx"]) <= cfg.ALIGN_MAX_SHIFT_PX
+        # fixture 画的类器官都在视野内部、面积够大：这两个计数必须是 0（不是缺键）。
         assert row["n_labels_discarded_contours"] == 0
         assert row["n_is_small"] == 0
 
 
 def test_run_stage1_stops_when_alignment_exceeds_limit(monkeypatch, fake_dataset, tmp_path):
+    """守兜底：偏移超出 ±ALIGN_MAX_SHIFT_PX 时停下并报 RuntimeError（消息点名 day/fov）。"""
     # 偏移搜索上限固定在 ±8，跑出来不可能 > 8，只能注入一个越界偏移来验证"停下并报错"这条风险兜底。
     monkeypatch.setattr(cfg, "DATA_ROOT", fake_dataset)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
@@ -59,6 +65,7 @@ def test_run_stage1_stops_when_alignment_exceeds_limit(monkeypatch, fake_dataset
 
 
 def test_run_stage1_stops_when_alignment_hits_search_boundary(monkeypatch, fake_dataset_boundary_shift, tmp_path):
+    """守边界：最优偏移落在 ±8 搜索边界上时按"需人工确认"报错，不许静默通过。"""
     # 真实搜索路径（不注入偏移）：掩码上移正好 8 行，最优解落在 ±8 的边界上。
     # 边界解意味着"真正的最优解可能在边界之外、被搜索范围截断了"（如真需 12 px 时只能给出 (8, 3)），
     # 所以要判定为需人工确认，而不是静默通过。
@@ -75,6 +82,7 @@ def test_run_stage1_stops_when_alignment_hits_search_boundary(monkeypatch, fake_
 
 
 def test_run_stage1_clears_previous_summary_before_running(monkeypatch, fake_dataset, tmp_path):
+    """守口径：开跑前先删旧汇总/QC，中途失败时不留上次的陈结果冒充本次。"""
     # 第一次成功跑完：汇总表 + QC 都在。
     monkeypatch.setattr(cfg, "DATA_ROOT", fake_dataset)
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
@@ -88,6 +96,7 @@ def test_run_stage1_clears_previous_summary_before_running(monkeypatch, fake_dat
     calls = {"n": 0}
 
     def _fail_on_second_fov(image, labels, max_shift):
+        """前一次调用返回 (0,0)，之后返回越界偏移：造出"第 2 个视野才失败"的路径。"""
         calls["n"] += 1
         return (labels, (0, 0)) if calls["n"] == 1 else (labels, (12, 0))
 

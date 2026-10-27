@@ -45,6 +45,7 @@ def _uid(fov: str, label: int, day: str) -> str:
 
 
 def _write_preprocessed(root, names, X):
+    """写 Stage 3 的 `X.npy` 与 `keep_features.json`：列序即模块输出的对齐基准。"""
     outdir = root / "preprocessed"
     outdir.mkdir(parents=True, exist_ok=True)
     np.save(outdir / "X.npy", np.asarray(X, dtype=np.float64))
@@ -132,6 +133,7 @@ def _run_stage4_into(monkeypatch, root, groups, names, X, *, perm=None, with_uid
 
 
 def test_covarying_features_form_one_module_with_legacy_paper_params():
+    """守口径：20 个共变特征在 D=60 的 legacy 扫描下正好合成一个模块，既不拆散也不并噪声。"""
     # 必须用 D=60：legacy 扫描是 `arange(2, len(linkage))[:max_clust_len+buffer]`，D=12 时只评得到
     # 3..11 个模块的切割（几乎全是退化切割），ALS(λ=1e0) 平滑后的 DB 峰落在紧致块内部，共变列会被拆开；
     # D≥40 后树上部才有可评估的结构、峰落在树高处，20 个强共变特征才能作为一个模块被发现。
@@ -154,11 +156,13 @@ def test_covarying_features_form_one_module_with_legacy_paper_params():
 
 
 def test_module_expression_shape():
+    """守边界：模块表达的样本维必须等于输入行数（列维才随模块数变）。"""
     rng = np.random.default_rng(0)
     X = rng.normal(size=(40, 9))
     names = [f"f{i}" for i in range(9)]
     mods = mod.discover_modules(X, names)
     expr = mod.module_expression(X, mods)
+    # 只钉样本维：行身份由调用方负责，函数不该增删行
     assert expr.shape[0] == 40
 
 
@@ -166,12 +170,14 @@ def test_module_expression_shape():
 
 
 def test_discover_modules_uses_legacy_selector_and_paper_params(monkeypatch):
+    """守口径：调用 SPOT 时必须显式传 legacy 选择器 + cfg.MODULE_PARAMS 全部键 + 预算好的特征类型。"""
     # v2.0.1 的默认是 'multiscale'（null 模型 + bootstrap 共识）：整条调用链上任何一处漏传
     # module_selection，模块数都会静默变掉。这里把真实函数的 kwargs 抓下来核对。
     captured: dict = {}
     real = mod.sam.hierarchical_cluster_features_into_SAM_modules
 
     def _spy(*args, **kwargs):
+        """spy-stub：抓下传给 SPOT 的 kwargs 后转交真实函数。"""
         captured.update(kwargs)
         return real(*args, **kwargs)
 
@@ -192,6 +198,7 @@ def test_discover_modules_uses_legacy_selector_and_paper_params(monkeypatch):
 
 
 def test_module_params_rejects_reserved_names(monkeypatch):
+    """守自检：cfg.MODULE_PARAMS 与显式 kwarg 重名时给中文 ValueError，而不是含糊的 TypeError。"""
     # 这些 kwarg 由 discover_modules 显式传：cfg.MODULE_PARAMS 里再出现一次就是 "got multiple values"，
     # 必须在调用前用中文错误拦住，而不是让 Python 抛一个看不出原因的 TypeError
     monkeypatch.setattr(cfg, "MODULE_PARAMS", {**cfg.MODULE_PARAMS, "module_selection": "multiscale"})
@@ -201,6 +208,7 @@ def test_module_params_rejects_reserved_names(monkeypatch):
 
 
 def test_discover_modules_closes_clustermap_figure_on_failure(monkeypatch):
+    """守资源：自检失败抛异常的路径上也必须关掉 SPOT 建的 clustermap figure。"""
     # SPOT 的 legacy 路径内部建了 clustermap figure；自检失败（这里把模块标签改坏）时也必须关掉，
     # 否则异常路径上每失败一次就漏一个 figure（长跑/测试进程里会一直累积）
     import matplotlib.pyplot as plt
@@ -208,6 +216,7 @@ def test_discover_modules_closes_clustermap_figure_on_failure(monkeypatch):
     real = mod.sam.hierarchical_cluster_features_into_SAM_modules
 
     def _broken(*args, **kwargs):
+        """spy-stub：把真实返回的模块标签改成全 0，模拟"标签不自洽"的自检失败。"""
         grid, labels, colorbar, names_clusters, indices_clusters = real(*args, **kwargs)
         return grid, np.zeros_like(np.asarray(labels)), colorbar, names_clusters, indices_clusters
 
@@ -220,6 +229,7 @@ def test_discover_modules_closes_clustermap_figure_on_failure(monkeypatch):
 
 
 def test_discover_modules_keeps_what_a_replot_needs():
+    """守契约：cluster_map 必须自带重画所需全部状态（相关系数矩阵、树、重排索引、类型颜色）。"""
     # cluster_map 必须是"不用重算就能重画"的完整状态：相关系数矩阵 + 树 + 重排索引 + 类型颜色。
     X, names = _covarying_matrix(n_objects=40, n_features=10, n_covarying=3, seed=4)
     mods = mod.discover_modules(X, names)
@@ -229,6 +239,7 @@ def test_discover_modules_keeps_what_a_replot_needs():
     assert np.allclose(cmap["corr"], cmap["corr"].T)
     assert np.allclose(np.diag(cmap["corr"]), 1.0)
     assert cmap["linkage"].shape == (D - 1, 4)
+    # 重排索引必须是 0..D-1 的一个置换（漏项或重复都会让热图行列错位）
     assert sorted(cmap["reordered_ind"].tolist()) == list(range(D))
     assert list(cmap["feature_names"]) == names
     assert np.asarray(cmap["module_labels"]).shape == (D,)
@@ -241,6 +252,7 @@ def test_discover_modules_keeps_what_a_replot_needs():
 
 
 def test_discover_modules_rejects_duplicate_names():
+    """守自检：特征重名会让 df_corr 的 index 静默折叠，必须在进 SPOT 之前拒绝。"""
     # 重名会让 SPOT 里的 pd.DataFrame(columns=...)/df_corr index 静默折叠（按名取列全部错位）
     X, names = _covarying_matrix(n_objects=20, n_features=6, n_covarying=2, seed=5)
     names[3] = names[2]
@@ -249,12 +261,14 @@ def test_discover_modules_rejects_duplicate_names():
 
 
 def test_discover_modules_rejects_name_column_mismatch():
+    """守自检：特征名个数与 X 的列数不符时报中文错误，避免下游按名取列全部错位。"""
     X, names = _covarying_matrix(n_objects=20, n_features=6, n_covarying=2, seed=6)
     with pytest.raises(ValueError, match="列数"):
         mod.discover_modules(X, names[:-1])
 
 
 def test_discover_modules_needs_enough_features():
+    """守边界：特征少到 legacy 扫描没有可评估的切割时必须报错，而不是返回空模块。"""
     # legacy 扫描从第 2 个合并点起，特征太少时没有任何可评估的切割
     X, _ = _covarying_matrix(n_objects=20, n_features=3, n_covarying=1, seed=7)
     with pytest.raises(ValueError, match="特征"):
@@ -265,6 +279,7 @@ def test_discover_modules_needs_enough_features():
 
 
 def test_module_expression_columns_follow_modules():
+    """守口径：模块表达列数 = 模块数、全部有限，且固定 random_state 下重算完全一致。"""
     X, names = _covarying_matrix(n_objects=50, n_features=12, n_covarying=4, seed=8)
     mods = mod.discover_modules(X, names)
     expr = mod.module_expression(X, mods)
@@ -275,6 +290,7 @@ def test_module_expression_columns_follow_modules():
 
 
 def test_representative_patches_returns_panels_and_purity_scores():
+    """守形状：尺寸不一的 patch 也能拼成每模块一张 uint8 马赛克，纯度矩阵形状为 (实例, 模块)。"""
     rng = np.random.default_rng(9)
     X, names = _covarying_matrix(n_objects=40, n_features=9, n_covarying=3, seed=9)
     mods = mod.discover_modules(X, names)
@@ -284,6 +300,7 @@ def test_representative_patches_returns_panels_and_purity_scores():
     purity, panels = mod.representative_patches(expr, patches, n_rows=2)
 
     n_modules = len(mods["feature_names"])
+    # 纯度是逐实例 × 逐模块的平均表达：两个维度都不能少，下游按模块挑代表图依赖它
     assert purity.shape == (40, n_modules)
     assert len(panels) == n_modules
     assert all(np.asarray(p).dtype == np.uint8 for p in panels)
@@ -291,9 +308,11 @@ def test_representative_patches_returns_panels_and_purity_scores():
 
 
 def test_representative_patches_rejects_misaligned_patches():
+    """守自检：patch 数与表达行数差一个也必须报中文 patch 错误，不许按位置截断。"""
     X, names = _covarying_matrix(n_objects=30, n_features=8, n_covarying=3, seed=10)
     mods = mod.discover_modules(X, names)
     expr = mod.module_expression(X, mods)
+    # 故意只给 29 个 patch 对 30 行表达
     patches = [np.zeros((6, 6), dtype=np.uint8) for _ in range(29)]
     with pytest.raises(ValueError, match="patch"):
         mod.representative_patches(expr, patches, n_rows=2)
@@ -303,6 +322,7 @@ def test_representative_patches_rejects_misaligned_patches():
 
 
 def test_run_stage4_requires_stage3(monkeypatch, tmp_path):
+    """守前置：缺 Stage3 预处理产物时给带"先跑"的中文错误，并点名 Stage3。"""
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     with pytest.raises(ValueError, match="Stage3") as excinfo:
         mod.run_stage4()
@@ -310,6 +330,7 @@ def test_run_stage4_requires_stage3(monkeypatch, tmp_path):
 
 
 def test_run_stage4_requires_stage2(monkeypatch, tmp_path):
+    """守前置：缺 Stage2 行身份产物时给带"先跑"的中文错误，并点名 Stage2。"""
     # 行身份来自 Stage 2：缺了它就没有可信的实例顺序，必须报错指明先跑 Stage2
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     X, names = _covarying_matrix(n_objects=10, n_features=8, n_covarying=3, seed=17)
@@ -320,6 +341,7 @@ def test_run_stage4_requires_stage2(monkeypatch, tmp_path):
 
 
 def test_run_stage4_writes_artifacts(monkeypatch, tmp_path):
+    """守落盘：五个产物齐全，且 QC 里的模块数/实例数/特征映射/计时都能逐项复核。"""
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     names = [f"f{i}" for i in range(12)]
     # 两个 (day, fov) 分组；最后一个实例故意没有 patch（Stage1 丢弃轮廓时会这样 → 它也不进 Stage2）
@@ -359,6 +381,7 @@ def test_run_stage4_writes_artifacts(monkeypatch, tmp_path):
     assert qc["meta_not_in_x_uids"] == [dropped_uid]
     assert "instance_uid" in qc["module_expr_row_source"]
     assert qc["n_features"] == len(names)
+    # 每个特征恰好属于一个模块：模块尺寸求和必须回到特征数
     assert sum(qc["module_sizes"].values()) == len(names)
     assert qc["module_sizes"][str(int(module_labels[0]))] == int((module_labels == module_labels[0]).sum())
     # feature → module 的对应关系也要能从 QC 复核
@@ -389,6 +412,7 @@ def test_run_stage4_writes_artifacts(monkeypatch, tmp_path):
 
 
 def test_run_stage4_excludes_meta_instances_that_stage2_dropped(monkeypatch, tmp_path):
+    """守口径：Stage1 meta 行是 Stage2 uid 的严格超集，多出来的要跑完并记进 QC，不要求行数相等。"""
     # Stage1 给每个标签都留 meta 行，但轮廓被丢弃的标签没有 patch、也不会进 Stage2 的特征表：
     # all_instances.csv 因此是 Stage2 uid 的**严格超集**。Stage4 必须照常跑完并把排除数记进 QC，
     # 而不是要求两者行数相等（真实数据上那种要求会让 Stage4 永远跑不起来）。
@@ -421,6 +445,7 @@ def test_run_stage4_excludes_meta_instances_that_stage2_dropped(monkeypatch, tmp
 
 
 def test_run_stage4_alignment_ignores_stage2_row_order(monkeypatch, tmp_path):
+    """守对齐：打乱 Stage2 行序后，模块划分/表达/代表图按 uid 对齐必须与原行序完全等价。"""
     # 行身份来自 instance_uid：把 Stage2 的行序（连同 X 的行）打乱后，模块划分、模块表达与代表图
     # 都应与原行序等价——若实现按位置装配 patch/表达，这里就会静默串行。
     names = [f"f{i}" for i in range(10)]
@@ -461,6 +486,7 @@ def test_run_stage4_alignment_ignores_stage2_row_order(monkeypatch, tmp_path):
 
 
 def test_run_stage4_falls_back_to_sam_shape_uids(monkeypatch, tmp_path):
+    """守兜底：all_features.csv 没有 instance_uid 索引时，行身份退回 sam_shape.npz 的 uid。"""
     # all_features.csv 没有 instance_uid 索引（表被重写成纯数值索引）时，行身份退回 sam_shape.npz 的 uid
     names = [f"f{i}" for i in range(10)]
     groups = [("day0", "A1", list(range(1, 21)))]
@@ -486,6 +512,7 @@ def test_run_stage4_falls_back_to_sam_shape_uids(monkeypatch, tmp_path):
 
 
 def test_run_stage4_rejects_instance_row_mismatch(monkeypatch, tmp_path):
+    """守自检：X 的行数必须等于 Stage2 的 uid 数，而不是 all_instances.csv 的 meta 行数。"""
     # 真正的对齐保护：X 的行数必须等于 Stage2 的 uid 数（all_instances.csv 的行数不是标准）
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     names = [f"f{i}" for i in range(8)]
@@ -500,6 +527,7 @@ def test_run_stage4_rejects_instance_row_mismatch(monkeypatch, tmp_path):
 
 
 def test_run_stage4_rejects_instances_without_patch(monkeypatch, tmp_path):
+    """守自检：Stage2 有特征行但 Stage1 没有对应 patch 时报错，并在消息里点名缺失的 uid。"""
     # Stage2 有特征行、Stage1 却没给它的 patch：这不能用"轮廓被丢弃"解释，必须报错而不是静默少图
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     names = [f"f{i}" for i in range(8)]

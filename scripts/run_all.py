@@ -1,4 +1,4 @@
-"""Stage 7 一键运行薄 CLI：Stage1→2→3→4→5→6→6b→静态图→时间图→报告。
+"""BioPheno 一键运行薄 CLI：Stage1→2→3→4→5→6→6b→静态图→时间图→报告。
 
     # 旧约定（config.DATA_ROOT 下的 <day>/<FOV>_多聚焦融合.png 布局）
     uv run python scripts/run_all.py
@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     """命令行接口：`--images` / `--masks` / `--output`（见 `biopheno.cli`）。"""
     parser = argparse.ArgumentParser(
         prog="run_all.py",
-        description="SPOT 复现一键运行（Stage1→7 + 报告）；不传 --images/--masks 时走 config.DATA_ROOT 的旧约定",
+        description="BioPheno 一键运行（Stage1→7 + 报告）；不传 --images/--masks 时走 config.DATA_ROOT 的旧约定",
     )
     cli.add_input_args(parser)
     return parser

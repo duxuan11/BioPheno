@@ -19,6 +19,7 @@ tracklet → 时序统计 → 图表 → 文本报告。
 BioPheno/
 ├─ README.md                  ← 本文件
 ├─ pyproject.toml             ← 项目与依赖定义（uv / pip 都读它）
+├─ uv.lock                    ← 锁定版本（uv 专用，135 个包，保证每次装出来一致）
 ├─ requirements.txt           ← 运行时依赖（pip 写法，与 pyproject 同一份清单）
 ├─ requirements-dev.txt       ← 开发/测试依赖（运行时 + pytest）
 ├─ conftest.py                ← pytest 用：把项目根放进 sys.path
@@ -53,7 +54,8 @@ BioPheno/
 
 ```bash
 cd D:/Code/myself/BioPheno
-uv sync                 # 装运行时 + dev（pytest）
+uv sync                 # 装运行时 + dev（pytest），严格按 uv.lock 的锁定版本
+uv sync --no-dev        # 只要运行时（不装 pytest）
 ```
 
 **或者 pip：**

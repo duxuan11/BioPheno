@@ -456,6 +456,7 @@ def _spy_figures(monkeypatch):
 
     @contextlib.contextmanager
     def spy(**kwargs):
+        """替身 savefig：转调真正的 savefig，并把产出的 figure 记进 figures，供“是否全部关闭”的断言用。"""
         with original(**kwargs) as figure:
             figures.append(figure)
             yield figure
@@ -514,9 +515,11 @@ def _images(figure) -> list[np.ndarray]:
 
 
 def test_render_temporal_writes_all_figures(fake_temporal_dir, tmp_path):
+    """守口径：出图清单必须恰好是任务说明里那 6 个文件名，多一张少一张都算错。"""
     paths = figs.render_temporal(fake_temporal_dir, outdir=tmp_path)
     names = {p.name for p in paths}
     assert names == _EXPECTED_FIGURES
+    # 1KB 下限只挡"0 字节 / 写到一半"的坏图；画面内容由下面各 F7–F11 用例逐一盯。
     assert all(p.stat().st_size > 1000 for p in paths)
 
 
@@ -540,11 +543,13 @@ def test_render_temporal_accepts_the_analysis_dir_itself(fake_temporal_dir, tmp_
 
 
 def test_render_temporal_closes_every_figure(fake_temporal_dir, tmp_path):
+    """顶住退化：出完图后进程里一张 figure 都不留（否则无头环境会持续攒内存）。"""
     figs.render_temporal(fake_temporal_dir, outdir=tmp_path)
     assert plt.get_fignums() == []
 
 
 def test_render_temporal_names_the_stage_of_a_missing_artifact(fake_temporal_dir, tmp_path):
+    """缺产物不许静默少画：报错必须点名阶段（proportions.npz 属 Stage6b）。"""
     (fake_temporal_dir / "analysis" / "proportions.npz").unlink()
     with pytest.raises(ValueError, match="Stage6b"):
         figs.render_temporal(fake_temporal_dir, outdir=tmp_path)
@@ -562,6 +567,7 @@ def test_render_temporal_rejects_a_non_row_stochastic_matrix(fake_temporal_dir, 
     path = fake_temporal_dir / "analysis" / "transitions.npz"
     payload = figs._read_npz(path, "Stage6b")
     payload["probs"] = np.asarray(payload["probs"], dtype=np.float64) * 2.0
+    # 乘 2 后行和变成 2：专打"行 = 来源、行和 = 1"这条契约。
     np.savez_compressed(path, **payload)
 
     with pytest.raises(ValueError, match="Stage6b"):
@@ -601,9 +607,11 @@ def test_staged_write_keeps_the_previous_figures_and_leaves_no_temporary(tmp_pat
     (out / "b.png").write_bytes(b"old-b")
 
     def render_a(path):
+        """替身：只写出 a.png 就返回（模拟正常完成的一步）。"""
         path.write_bytes(b"new-a")
 
     def render_b(path):
+        """替身：先建出 b.png 再抛错，模拟 savefig 中途失败（文件已存在但不能算 staged）。"""
         path.write_bytes(b"half-b")  # 模拟 savefig 中途抛错：文件已建出来，但没登记进 staged
         raise RuntimeError("savefig 挂了")
 
@@ -622,10 +630,12 @@ def test_staged_write_replaces_only_after_every_render_succeeds(tmp_path):
     seen: list[bytes] = []
 
     def render_a(path):
+        """替身：先记录当时磁盘上的 a.png，再写新内容（用来看换名时机）。"""
         seen.append((out / "a.png").read_bytes())
         path.write_bytes(b"new-a")
 
     def render_b(path):
+        """替身：同样先记录 a.png，再写新内容——验证两张图都渲染完才统一换名。"""
         seen.append((out / "a.png").read_bytes())  # 第一张也还没换名
         path.write_bytes(b"new-b")
 
@@ -650,6 +660,7 @@ def test_f7_stacked_bars_sum_to_one_per_bin(fake_temporal_dir, tmp_path, monkeyp
     for axis in panels:
         totals = _panel_totals(axis)
         assert len(totals) == len(_FRAMES)
+        # 容差 1e-9 只吸收浮点累加误差：占比本身行和为 1，堆叠条高度之和必须是精确 1。
         assert all(abs(total - 1.0) < 1e-9 for total in totals.values())
 
 
@@ -790,6 +801,7 @@ def test_f9_labels_a_degenerate_phenotype_trajectory(fake_temporal_dir, tmp_path
     path = fake_temporal_dir / "analysis" / "trajectories.npz"
     payload = figs._read_npz(path, "Stage6b")
     payload["trajectories"] = np.full_like(np.asarray(payload["trajectories"], dtype=np.float64), np.nan)
+    # Stage6b 退化时轨迹会整体落成 NaN（不是 0）：用 NaN 而不是 0 才能区分"没有轨迹"和"轨迹在原点"。
     np.savez_compressed(path, **payload)
 
     with pytest.warns(UserWarning, match="退化"), _spy_figures(monkeypatch) as figures:
@@ -896,6 +908,7 @@ def test_f11_match_events_follow_the_qc(fake_temporal_dir, tmp_path, monkeypatch
     table, qc = _match_rows(rows, chained=True)
     expected_events = [
         qc["fovs"][fov]["pairs"][pair]
+        # 按数字元组排序（不是字符串序）：否则 "10->11" 会排到 "2->3" 前面，和柱子 x 位置错开。
         for fov in _FOVS
         for pair in sorted(qc["fovs"][fov]["pairs"], key=lambda text: tuple(int(part) for part in text.split("->")))
     ]
@@ -934,6 +947,7 @@ def test_f11_survives_a_qc_without_any_match(fake_singleton_dir, tmp_path, monke
         figs.render_temporal(fake_singleton_dir, outdir=tmp_path)
     figure = figures[_RENDER_ORDER.index("F11_match_events.png")]
     events_axis = next(axis for axis in figure.axes if axis.patches)
+    # 左面板仍然有柱子（高度全 0）而非空面板："没有事件"要画出来，不能悄悄空白。
     assert all(float(patch.get_height()) == 0.0 for patch in events_axis.patches)
     assert "没有" in _all_texts(figure)
 

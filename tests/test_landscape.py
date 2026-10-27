@@ -24,10 +24,10 @@ matplotlib.use("Agg", force=True)
 import numpy as np
 import pandas as pd
 import pytest
-from SPOT.Analysis import sam_analysis as sam
 
 from biopheno import config as cfg
 from biopheno import landscape as land
+from SPOT.Analysis import sam_analysis as sam
 
 # —— 合成数据的列名（Stage 2 的原始特征表）——
 _AREA = "area"
@@ -47,10 +47,12 @@ def _uid(fov: str, label: int, day: str) -> str:
 
 
 def _uids() -> list[str]:
+    """按 `_GROUPS` × label 1..40 生成 Stage 1 的 uid 列表（顺序 = 写盘顺序 = X 的行序）。"""
     return [_uid(fov, label, day) for day, fov in _GROUPS for label in range(1, _PER_GROUP + 1)]
 
 
 def _write_preprocessed(root, names, X):
+    """写 Stage 3 的 `X.npy` 与 `keep_features.json`：列序即 UMAP/k-means 的输入列序。"""
     outdir = root / "preprocessed"
     outdir.mkdir(parents=True, exist_ok=True)
     np.save(outdir / "X.npy", np.asarray(X, dtype=np.float64))
@@ -132,6 +134,7 @@ def _build_inputs(root, *, kept_names=None, raw_columns=_RAW_COLUMNS, uids=None,
 
 
 def _read_json(path):
+    """读 UTF-8 JSON（`kmeans_metrics.json` / QC），返回 dict。"""
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -139,12 +142,14 @@ def _read_json(path):
 
 
 def test_clusters_recover_two_blobs_and_are_ordered_by_score():
+    """守口径：两个 blob 被胘部法切成 2 簇，并按平均 score 升序重排成 1..K。"""
     rng = np.random.default_rng(0)
     emb = np.vstack([rng.normal(0, 0.3, (60, 2)), rng.normal(6, 0.3, (60, 2))])
     labels, metrics = land.cluster(emb, k_range=(2, 4))
     assert metrics["k"] == 2
     assert len(np.unique(labels)) == 2
     score = np.where(labels == labels[0], 0.2, 0.9)
+    # 0.2 vs 0.9：两簇均值差得够远，并列不会把"高得分簇拿 2 号"的断言搞成玄学
     ordered, mapping = land.order_clusters_by_score(labels, score)
     assert ordered.min() == 1 and ordered[score > 0.5].max() == 2
     # 映射表要和重排结果自洽：平均 score 高的旧簇必须映射到 2
@@ -153,11 +158,13 @@ def test_clusters_recover_two_blobs_and_are_ordered_by_score():
 
 
 def test_embedding_is_deterministic():
+    """守复现：固定 random_state 下两次 embed 必须给出逐元素一致的 (N, 2) 坐标。"""
     rng = np.random.default_rng(1)
     X = rng.normal(size=(120, 12))
     a = land.embed(X)
     b = land.embed(X)
     assert a.shape == (120, 2)
+    # atol=1e-6：允许浮点末位抖动，但不允许坐标整体漂移（离线重画图也必须一致）
     assert np.allclose(a, b, atol=1e-6)
 
 
@@ -170,16 +177,21 @@ def test_embed_passes_paper_umap_params_verbatim(monkeypatch):
     real_umap = land.umap.UMAP
 
     class _Spy:
+        """spy-stub：记录构造 kwargs，再转给真实 `umap.UMAP` 干活。"""
+
         def __init__(self, **kwargs):
+            """把 kwargs 抄一份给断言，并持有真实 UMAP 实例。"""
             recorded.update(kwargs)
             self._inner = real_umap(**kwargs)
 
         def fit_transform(self, X):
+            """转调真实 UMAP 的 `fit_transform`，保证返回值形状不变。"""
             return self._inner.fit_transform(X)
 
     monkeypatch.setattr(land.umap, "UMAP", _Spy)
     X = np.random.default_rng(2).normal(size=(120, 6))
     out = land.embed(X)
+    # 全等比较：多传 n_jobs/n_components 之类"为了图好看"的参数也会让"论文参数"名不副实
     assert recorded == cfg.UMAP_PARAMS
     assert out.shape == (120, 2)
 
@@ -190,6 +202,7 @@ def test_cluster_uses_spot_scan_with_ploton_false(monkeypatch):
     real_scan = sam.KMeans_cluster_low_dimensional_embedding_with_scan
 
     def _spy(low_dimensional_feats, k_range=(2, 20), ploton=True):
+        """spy-stub：记录每次调用的 k_range / ploton 后转交 SPOT 原函数。"""
         calls.append({"k_range": tuple(k_range), "ploton": ploton})
         return real_scan(low_dimensional_feats, k_range=k_range, ploton=ploton)
 
@@ -198,6 +211,7 @@ def test_cluster_uses_spot_scan_with_ploton_false(monkeypatch):
     emb = np.vstack([rng.normal(0, 0.3, (60, 2)), rng.normal(6, 0.3, (60, 2))])
     original_scan = sam.chooseBestKforKMeansParallel
     labels, metrics = land.cluster(emb, k_range=(2, 4))
+    # 只调一次、k_range 原样透传（上界不收盘，扫描范围完全由 SPOT 决定）
     assert calls == [{"k_range": (2, 4), "ploton": False}]
     # pandas-3 兼容补丁只在调用期间生效，绝不能泄到进程里其他调用点
     assert sam.chooseBestKforKMeansParallel is original_scan
@@ -218,6 +232,7 @@ def test_cluster_k_matches_argmin_of_scaled_inertia():
     assert list(metrics["silhouette"]) == [str(k) for k in ks]
     scaled = np.array([metrics["scaled_inertia"][str(k)] for k in ks])
     assert metrics["k"] == ks[int(np.argmin(scaled))]
+    # chosen_k 与 k 是同一决定的两种记法（一个给外层 QC、一个给旧调用点），写重了也必须一致
     assert metrics["chosen_k"] == metrics["k"]
     assert len(np.unique(labels)) == metrics["k"]
 
@@ -227,6 +242,7 @@ def test_cluster_restores_spot_function_when_scan_raises(monkeypatch):
     original = sam.chooseBestKforKMeansParallel
 
     def _boom(low_dimensional_feats, k_range):
+        """stub：直接抛错，模拟 SPOT 的肘部扫描在补丁生效期间失败。"""
         raise RuntimeError("模拟 elbow 扫描失败")
 
     monkeypatch.setattr(land, "_choose_best_k_pandas3", _boom)
@@ -237,6 +253,7 @@ def test_cluster_restores_spot_function_when_scan_raises(monkeypatch):
 
 
 def test_cluster_reports_inertia_and_silhouette_for_every_scanned_k():
+    """守口径：k_range=(2,5) 只扫 2/3/4（SPOT 不含上界），且每个 k 都有 inertia 与 silhouette。"""
     rng = np.random.default_rng(4)
     emb = np.vstack([rng.normal(0, 0.3, (60, 2)), rng.normal(6, 0.3, (60, 2))])
     labels, metrics = land.cluster(emb, k_range=(2, 5))
@@ -254,15 +271,19 @@ def test_cluster_reports_inertia_and_silhouette_for_every_scanned_k():
 
 
 def test_cluster_rejects_degenerate_k_range():
+    """守边界：k_range=(3,3) 是空扫描区间（不含上界），必须报"k 范围"错误。"""
+    # 数据本身无关紧要：退化的是扫描区间，不是点集
     emb = np.random.default_rng(5).normal(size=(30, 2))
     with pytest.raises(ValueError, match="k 范围"):
         land.cluster(emb, k_range=(3, 3))
 
 
 def test_order_clusters_mapping_table_is_consistent_with_relabeled_ids():
+    """守口径：映射表是 (旧标签, 新标签) 两列、与重排结果逐行自洽，编号 1-based 且按 score 升序。"""
     clusters = np.array([0] * 4 + [1] * 4 + [2] * 4)
     score = np.array([0.5] * 4 + [0.1] * 4 + [0.9] * 4)
     ordered, mapping = land.order_clusters_by_score(clusters, score)
+    # 论文口径 1..K：SPOT 原生的 0-based 排序号被 +1，最小簇号必须是 1
     assert ordered.min() == 1
     assert set(np.unique(ordered)) == {1, 2, 3}
     # 映射表是 (旧标签, 新标签) 两列的数组，且与重排结果逐行一致
@@ -278,6 +299,7 @@ def test_order_clusters_reports_contextual_error_when_mapping_table_is_truncated
     """SPOT 返回的映射表项数与簇数对不上时，要给带上下文的中文错误（而不是 numpy reshape 的英文堆栈）。"""
 
     def _truncated(clusters, score, order="ascending"):
+        """stub：标签不变，但映射表只给 1 项（模拟 SPOT 返回的映射表被截断）。"""
         return np.asarray(clusters), {0: 0}  # 编号合法，但映射表少了两项
 
     monkeypatch.setattr(land.sam, "reorder_and_relabel_clusters", _truncated)
@@ -290,6 +312,7 @@ def test_order_clusters_reports_contextual_error_when_mapping_table_is_truncated
 def test_numbering_qc_flags_tied_cluster_scores():
     """簇均值并列时编号是任意的：只 flag（不报错），并仍把 score 单调性记为 True。"""
     labels = np.array([1, 1, 2, 2])
+    # 均值全为 0.5：单调性平凡成立，但必须 flag 成 tied（编号本身是任意的）
     qc = land._numbering_qc(labels, score=np.full(4, 0.5), native=None, preprocessed=None, source="bbox")
     assert qc["tied_score_means"] is True
     assert qc["monotone_score"] is True
@@ -318,6 +341,7 @@ def test_per_instance_eccentricity_path_is_independent_of_score_path():
 
 
 def test_density_returns_per_condition_field_and_leaves_no_figures():
+    """守口径：每个条件一个密度场（长度 = 该条件点数）+ (2, N) 掩码，且不留下 SPOT 开的 figure。"""
     rng = np.random.default_rng(6)
     emb = rng.normal(size=(30, 2))
     conditions = np.array(["a"] * 15 + ["b"] * 15)
@@ -326,6 +350,7 @@ def test_density_returns_per_condition_field_and_leaves_no_figures():
     before = set(plt.get_fignums())
     densities, select = land.density(emb, conditions)
     assert len(densities) == 2 and select.shape == (2, 30)
+    # 两个条件的掩码必须把 30 个点无重不漏地分完（加起来正好 30）
     assert select.sum() == 30
     assert all(d.shape == (15,) for d in densities)
     assert all(np.all(np.isfinite(d)) for d in densities)
@@ -352,6 +377,7 @@ def test_density_without_conditions_treats_all_points_as_one_condition():
 
 
 def test_run_stage5_writes_uid_tagged_artifacts(monkeypatch, tmp_path):
+    """守落盘：四份产物都带 instance_uid，且簇编号 1..K 在原生离心率均值上递增。"""
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     uids, X = _build_inputs(tmp_path)
 
@@ -370,6 +396,7 @@ def test_run_stage5_writes_uid_tagged_artifacts(monkeypatch, tmp_path):
     assert labels_df["cluster"].min() == 1
     assert sorted(labels_df["cluster"].unique()) == list(range(1, labels_df["cluster"].max() + 1))
     # 0-based 的原始 k-means 标签也留着，方便核对重排
+    # cluster_raw 必须从 0 起（与 cluster 的 1-based 形成对照，一眼看出重排有没有生效）
     assert labels_df["cluster_raw"].min() == 0
     # day/fov/time_hours 从 all_instances.csv 按 uid 连接进来（Stage 6/7 画分面图要用）
     assert labels_df["day"].iloc[0] == "day0" and labels_df["fov"].iloc[0] == "A1"
@@ -407,12 +434,14 @@ def test_run_stage5_writes_uid_tagged_artifacts(monkeypatch, tmp_path):
 
 
 def test_run_stage5_requires_preprocessed_matrix(monkeypatch, tmp_path):
+    """守前置：缺 Stage3 的 `X.npy` 时给带 Stage3 上下文的中文错误。"""
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     with pytest.raises(ValueError, match="Stage3"):
         land.run_stage5()
 
 
 def test_run_stage5_rejects_row_count_mismatch(monkeypatch, tmp_path):
+    """守自检：特征表比 `X.npy` 少 7 行（Stage2 重跑而 Stage3 是旧的）时报带"行"上下文的错误。"""
     monkeypatch.setattr(cfg, "OUTPUT_ROOT", tmp_path)
     uids, _X = _build_inputs(tmp_path)
     # 特征表少 7 行（例如 Stage 2 被重跑过、而 Stage 3 的 X.npy 还是旧的）

@@ -39,15 +39,18 @@ class _Tee:
     """把 stdout 同时写进控制台与日志文件（逐阶段日志的关键：长跑时能 `tail` 一份完整记录）。"""
 
     def __init__(self, *streams):
+        """记下要同时写入的多个流（控制台 stdout + 该阶段日志文件）。"""
         self._streams = streams
 
     def write(self, text: str) -> int:
+        """把一段文本依次写进每个流并立即 flush，返回写入长度（满足 TextIO 的 write 约定）。"""
         for stream in self._streams:
             stream.write(text)
             stream.flush()
         return len(text)
 
     def flush(self) -> None:
+        """刷新所有流，避免程序异常退出时日志尾部还留在缓冲区里。"""
         for stream in self._streams:
             stream.flush()
 

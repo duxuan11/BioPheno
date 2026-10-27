@@ -78,9 +78,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from SPOT.Analysis import sam_analysis as sam
 
 from biopheno import config as cfg
+from SPOT.Analysis import sam_analysis as sam
 
 # —— 上游产物（Stage 5 / Stage 6 的落盘位置）——
 _ANALYSIS_SUBDIR: str = "analysis"
@@ -94,6 +94,7 @@ _TRANSITIONS_FILE: str = "transitions.npz"
 _TRAJECTORIES_FILE: str = "trajectories.npz"
 _AFFINITY_FILE: str = "affinity.npz"
 _QC_FILE: str = "stage6b_qc.json"
+
 
 # 一个采样点一个箱：内部边界是 1、2（frame_idx 的整数值），所以分析时间用"箱中心" frame_idx + 0.5。
 def time_intervals() -> tuple[float, ...]:
@@ -122,10 +123,12 @@ _COLLAPSE_EPS: float = 1e-9
 
 
 def _fail(message: str) -> NoReturn:
+    """统一的早失败出口：缺上游产物或不变量不成立时一律抛 RuntimeError，不返回半套结果。"""
     raise RuntimeError(message)
 
 
 def _as_float_array(values, name: str) -> np.ndarray:
+    """转成 1 维 float64 数组；维度不符直接报错，避免后面按错误的轴算出一堆静默错误。"""
     array = np.asarray(values, dtype=np.float64)
     if array.ndim != 1:
         raise ValueError(f"{name} 必须是 1 维数组，实际是 {array.shape}")
@@ -798,6 +801,7 @@ def _bin_labels(n_bins: int) -> tuple[np.ndarray, list[str], list[float]]:
 
 
 def _read_csv(path: Path, missing_message: str) -> pd.DataFrame:
+    """读 CSV；文件不存在就带着调用方给的提示（该先跑哪个 Stage）早失败。"""
     if not path.exists():
         _fail(missing_message)
     return pd.read_csv(path)
