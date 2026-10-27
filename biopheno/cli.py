@@ -31,6 +31,12 @@ def add_input_args(parser: argparse.ArgumentParser) -> None:
         metavar="目录",
         help="产物根目录（实例/特征/图/报告都写在这里，默认 output）",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        metavar="N",
+        help="跟视野并行的进程数（0 = 按核数自动，1 = 顺序执行；默认取 config.PARALLEL_JOBS=0）",
+    )
 
 
 def configure_from_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> input_mod.Dataset | None:
@@ -38,7 +44,14 @@ def configure_from_args(parser: argparse.ArgumentParser, args: argparse.Namespac
 
     - 两个输入目录都没给：返回 None（保持旧约定）；只给了 `--output` 就只改输出根。
     - 只给其中一个：`parser.error`（退出码 2）——原图与掩码必须成对，猜不得。
+    - `--jobs`：跟视野并行的进程数（0 = 自动、1 = 顺序）；与输入无关，单独生效。
     """
+    jobs = getattr(args, "jobs", None)
+    if jobs is not None:
+        if int(jobs) < 0:
+            parser.error("--jobs 不能为负：用 0 表示按核数自动，1 表示顺序执行")
+        cfg.PARALLEL_JOBS = int(jobs)
+        print(f"跟视野并行度 → {cfg.PARALLEL_JOBS}（0 = 自动，1 = 顺序）")
     if args.images is None and args.masks is None:
         if args.output is not None:
             cfg.OUTPUT_ROOT = Path(args.output)

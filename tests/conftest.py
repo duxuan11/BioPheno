@@ -15,6 +15,19 @@ from biopheno import instances as inst
 _NAME_SUFFIX: str = "_多聚焦融合"
 
 
+@pytest.fixture(autouse=True)
+def _sequential_by_default(monkeypatch):
+    """全局 autouse：默认把两个并行度都钉成 1，单测里不起任何子进程。
+
+    - `N_JOBS`：SPOT 的 `n_jobs=-1` 会为 2–3 个实例也起一堆 loky 子进程（每个都要重新 import
+      skimage/mahotas），单测里没有收益；
+    - `PARALLEL_JOBS`：`0`（自动）会按视野数开进程池；并行本身由 `tests/test_parallel.py`
+      显式传 `jobs=2` 验证。
+    """
+    monkeypatch.setattr(cfg, "N_JOBS", 1)
+    monkeypatch.setattr(cfg, "PARALLEL_JOBS", 1)
+
+
 @pytest.fixture
 def make_mask_and_image():
     """合成 (亮度图 uint8, 标签图 uint16) 的工厂 fixture，避免测试依赖 1.2 GB 真实数据。

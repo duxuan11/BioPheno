@@ -19,6 +19,7 @@ from skimage.measure import find_contours
 from skimage.util import img_as_ubyte
 
 from biopheno import config as cfg
+from biopheno import parallel
 
 # 真实数据的文件名后缀：原图 <day>/<fov>_多聚焦融合.png，掩码 <day>/Output/<fov>_多聚焦融合.tif。
 _NAME_SUFFIX: str = "_多聚焦融合"
@@ -499,6 +500,56 @@ def load_catalog(outdir: Path) -> dict:
     return {"meta": meta, "image": None, "labels": None, "contours": contours, "patches": patches}
 
 
+def _check_align_offset(day: str, fov: str, dy: int, dx: int) -> None:
+    """对齐偏移的风险检查：**摸到或超过** `cfg.ALIGN_MAX_SHIFT_PX` 时直接报错停下（Spec §9 风险表）。
+
+    真正的探测器是 `>=`：`build_catalog` 把 `max_shift` 当搜索半径传给 `align_mask_to_image`，
+    最优解按构造必然落在 ±max_shift 之内，单靠 `>` 永远不触发（写在那里的检查形同虚设）。
+    反过来，偏移**正好落在边界**恰恰是坏消息：真正的最优解可能在边界之外被搜索范围截断了
+    （例：真需要 12 px 时搜索只能给出 (8, 3)，max(...) 仍是 8）。所以边界解同样要人工确认。
+    `>` 保留为防御性兜底：非默认调用者（不经 build_catalog 自带的搜索）可能直接给出越界偏移。
+    """
+    max_shift = int(cfg.ALIGN_MAX_SHIFT_PX)
+    offset = max(abs(dy), abs(dx))
+    if offset >= max_shift:
+        why = "摸到了搜索边界，真正的最优解可能被搜索范围截断" if offset == max_shift else "超过了上限"
+        raise RuntimeError(
+            f"{day}/{fov} 的掩码与原图对齐偏移 (dy={dy}, dx={dx}) {why}（±{max_shift} px），"
+            "请先人工确认对齐再继续（Spec §9 风险表）"
+        )
+
+
+def _stage1_frame(day: str, fov: str) -> dict:
+    """处理一个 (day, fov)：建目录 → 风险检查 → 落盘，返回汇总需要的小结构。
+
+    这是 `parallel.map_frames` 的任务函数，所以必须是**模块级**（要能被 pickle 到子进程），
+    并且**不返回大数组**：contours/patches 已经写进各自的目录，父进程只需要 meta 与计数字段。
+    """
+    catalog = build_catalog(day, fov)
+    dy, dx = catalog["align_offset"]
+    _check_align_offset(day, fov, dy, dx)
+    save_catalog(catalog, Path(cfg.OUTPUT_ROOT) / _INSTANCES_SUBDIR / day / fov)
+    meta = catalog["meta"]
+    # 只打标不删：没有可用轮廓的标签仍在 meta 里，这里只数数，不假设 contours/patches 有条目
+    n_discarded = int((meta["n_contours_discarded"] > 0).sum())
+    n_small = int(meta["is_small"].sum())
+    return {
+        "day": day,
+        "fov": fov,
+        "meta": meta,
+        "n_instances": len(meta),
+        "align_dy": int(dy),
+        "align_dx": int(dx),
+        "n_labels_discarded_contours": n_discarded,
+        "n_is_small": n_small,
+        # 日志行由子进程带回、父进程按顺序打，所以并行时逐阶段日志的行序也不变
+        "line": (
+            f"[{day}/{fov}] 实例 {len(meta)} 个，对齐偏移 (dy={dy}, dx={dx})，"
+            f"丢弃轮廓的标签 {n_discarded} 个，小实例 {n_small} 个"
+        ),
+    }
+
+
 def run_stage1(days: list[str] | None = None, fovs: list[str] | None = None) -> pd.DataFrame:
     """跑完 Stage 1 并汇总（Spec §6-Stage1）：逐 (day, fov) 建目录、落盘、返回合并后的 meta 表。
 
@@ -512,6 +563,10 @@ def run_stage1(days: list[str] | None = None, fovs: list[str] | None = None) -> 
 
     风险兜底：对齐偏移**摸到或超过** `cfg.ALIGN_MAX_SHIFT_PX` 时直接报错停下（Spec §9 风险表：
     需人工确认），而不是带着错位的掩码往下跑。
+
+    并行：各 (day, fov) 完全独立，所以用 `parallel.map_frames` 按视野并跑（`cfg.PARALLEL_JOBS`；
+    `1` = 顺序）。每个子进程只写自己的 `<day>/<fov>/` 目录，汇总表与 QC 仍由父进程按声明顺序拼，
+    所以行序、QC 键序、日志行序与顺序执行完全一致。
 
     失败时不留半套结果：开跑前先删掉上一代的 `all_instances.csv` / `stage1_qc.json`。汇总与 QC 只在
     全部视野跑完后才写，而分视野目录在循环内即时落盘，所以若第 N 个视野抛错，磁盘上会是
@@ -535,39 +590,16 @@ def run_stage1(days: list[str] | None = None, fovs: list[str] | None = None) -> 
 
     metas: list[pd.DataFrame] = []
     qc: dict[str, dict[str, int]] = {}
-    for day, fov in frames:
-        catalog = build_catalog(day, fov)
-        dy, dx = catalog["align_offset"]
-        max_shift = int(cfg.ALIGN_MAX_SHIFT_PX)
-        offset = max(abs(dy), abs(dx))
-        # 真正的探测器是 `>=`：build_catalog 把 max_shift 当搜索半径传给 align_mask_to_image，
-        # 最优解按构造必然落在 ±max_shift 之内，单靠 `>` 永远不触发（写在那里的检查形同虚设）。
-        # 反过来，偏移**正好落在边界**恰恰是坏消息：真正的最优解可能在边界之外被搜索范围截断了
-        # （例：真需要 12 px 时搜索只能给出 (8, 3)，max(...) 仍是 8）。所以边界解同样要人工确认。
-        # `>` 保留为防御性兜底：非默认调用者（不经过 build_catalog 自带的搜索）可能直接给出越界偏移。
-        if offset >= max_shift:
-            why = "摸到了搜索边界，真正的最优解可能被搜索范围截断" if offset == max_shift else "超过了上限"
-            raise RuntimeError(
-                f"{day}/{fov} 的掩码与原图对齐偏移 (dy={dy}, dx={dx}) {why}（±{max_shift} px），"
-                "请先人工确认对齐再继续（Spec §9 风险表）"
-            )
-        save_catalog(catalog, out_root / day / fov)
-        meta = catalog["meta"]
-        # 只打标不删：没有可用轮廓的标签仍在 meta 里，这里只数数，不假设 contours/patches 有条目
-        n_discarded = int((meta["n_contours_discarded"] > 0).sum())
-        n_small = int(meta["is_small"].sum())
-        qc[f"{day}/{fov}"] = {
-            "n_instances": len(meta),
-            "align_dy": int(dy),
-            "align_dx": int(dx),
-            "n_labels_discarded_contours": n_discarded,
-            "n_is_small": n_small,
+    for result in parallel.map_frames(_stage1_frame, frames):
+        print(result["line"])
+        metas.append(result["meta"])
+        qc[f"{result['day']}/{result['fov']}"] = {
+            "n_instances": result["n_instances"],
+            "align_dy": result["align_dy"],
+            "align_dx": result["align_dx"],
+            "n_labels_discarded_contours": result["n_labels_discarded_contours"],
+            "n_is_small": result["n_is_small"],
         }
-        print(
-            f"[{day}/{fov}] 实例 {len(meta)} 个，对齐偏移 (dy={dy}, dx={dx})，"
-            f"丢弃轮廓的标签 {n_discarded} 个，小实例 {n_small} 个"
-        )
-        metas.append(meta)
 
     summary = pd.concat(metas, ignore_index=True) if metas else pd.DataFrame(columns=list(_META_COLUMNS))
     summary.to_csv(out_root / _ALL_INSTANCES_FILE, index=False)

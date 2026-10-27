@@ -44,14 +44,6 @@ def _write_stage1_artifacts(monkeypatch, root, day, fov, catalog, image, labels)
     monkeypatch.setitem(cfg.INPUT_FILES, (day, fov), (image_path, mask_path))
 
 
-@pytest.fixture(autouse=True)
-def _single_process(monkeypatch):
-    """autouse fixture：把 cfg.N_JOBS 钉成 1，让 SPOT 不起 loky 子进程；无返回值。"""
-    # SPOT 的 n_jobs=-1 会为 2–3 个实例也起一堆 loky 子进程（每个都要重新 import skimage/mahotas），
-    # 单测里没有任何并行收益。这里只是把并行度钉成 1，测试体本身保持与计划逐字一致。
-    monkeypatch.setattr(cfg, "N_JOBS", 1)
-
-
 def test_shape_features_have_expected_families(make_mask_and_image):
     """守口径：shape 矩阵行数 = 轮廓数、全有限，且列名含 ECT_ 与 area 家族。"""
     _image, labels = make_mask_and_image(n_blobs=3)

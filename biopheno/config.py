@@ -94,6 +94,13 @@ MAX_CENT_DIST_PX: float = 60.0
 # 传给 SPOT 特征函数的并行度：-1 表示用全部 CPU 核。
 N_JOBS: int = -1
 
+# 跨 (天, 视野) 的进程级并行度（Stage 1 / Stage 2 用，见 parallel.py）：
+# 0 = 自动（min(视野数, max(1, 逻辑核 // 2))）、1 = 顺序执行、>1 = 固定上限。
+# 默认 1（顺序）：P0–P3 之后单帧成本只剩几秒，而每个子进程要重新 import numpy/skimage 并解码自己的大图，
+# 实测 9 帧的 Stage2 顺序 41.8 s、jobs=3 87.1 s、jobs=6 61.6 s、jobs=9 42.8 s —— **并行不赚**。
+# 帧数很多（≳24，例如多个时间点 × 多个视野）或单帧很重时才值得 `--jobs N` 手动打开。
+PARALLEL_JOBS: int = 1
+
 # 是否按视野做批次校正：False，因为三个视野本身就是生物学重复，按视野归一化会抹掉要展示的差异（Spec D5）。
 BATCH_CORRECT_FOV: bool = False
 

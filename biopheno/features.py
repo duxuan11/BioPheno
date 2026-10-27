@@ -10,6 +10,7 @@
 本模块只读 `SPOT/`，不修改它。
 """
 
+import functools
 import inspect
 import json
 import time
@@ -22,6 +23,7 @@ from skimage import exposure
 
 from biopheno import config as cfg
 from biopheno import instances as inst
+from biopheno import parallel
 from SPOT.Analysis import preprocessing
 from SPOT.Features import features as spot_features
 
@@ -434,6 +436,98 @@ def _unusable_block_reason(
     return None
 
 
+def _stage2_frame(day: str, fov: str, *, stage1_uids: dict[str, set[str]] | None) -> dict:
+    """算一个 (day, fov) 的形状/外观特征块，交给父进程拼表（`parallel.map_frames` 的任务函数）。
+
+    必须是**模块级**函数（要 pickle 到子进程），而且不碰全局拟合：返回 shape / appearance 块与
+    `sub_meta`（行身份），全实例一次拟合的 ECT 降维仍由父进程做。
+
+    `line` 是交给父进程按顺序打印的日志行：子进程的 print 不会被父进程的 `redirect_stdout` 捕获，
+    不这样带回来，并行时逐阶段日志会丢掉每个视野那一行。
+    """
+    meta, contours_by_label, image = _stage1_catalog(day, fov)
+    imshape = image.shape
+    # 先核对"复用到的实例"与 Stage 1 汇总表是同一批，再往下算（对不上直接 RuntimeError）
+    uid_check = _cross_check_stage1_uids(day, fov, meta, stage1_uids)
+    # 只算有轮廓的实例；contours 里没有键的标签照样留在 meta 里，但这里数一下跳过多少
+    keep_labels = [int(label) for label in meta["label"] if int(label) in contours_by_label]
+    entry: dict = {
+        "n_instances_meta": len(meta),
+        "n_instances_computed": len(keep_labels),
+        "n_skipped_no_contour": len(meta) - len(keep_labels),
+        "uid_cross_check": uid_check,
+        "skipped_reason": None,
+    }
+    result: dict = {
+        "day": day,
+        "fov": fov,
+        "entry": entry,
+        "skipped": True,
+        "meta": None,
+        "shape": None,
+        "appearance": None,
+        "names_s": None,
+        "names_a": None,
+    }
+    if not keep_labels:
+        # 整个视野一个可用轮廓都没有（分割失败，或标签全是退化小块）：宽度为 0 的块拼进
+        # vstack 会让整轮在最后一步崩掉，所以整帧跳过、记账、继续。
+        entry["skipped_reason"] = "no_usable_contour"
+        entry["n_shape_features_raw"] = 0
+        entry["n_appearance_features"] = 0
+        entry["n_nonfinite_shape"] = 0
+        entry["n_nonfinite_appearance"] = 0
+        entry["shape_seconds"] = 0.0
+        entry["appearance_seconds"] = 0.0
+        result["line"] = f"[{day}/{fov}] 无可用轮廓（meta {len(meta)} 个实例全部跳过），跳过该视野"
+        return result
+
+    row_of_label = {int(label): row for row, label in enumerate(meta["label"])}
+    sub_meta = meta.iloc[[row_of_label[label] for label in keep_labels]].reset_index(drop=True)
+    contours = [contours_by_label[label] for label in keep_labels]
+
+    t0 = time.perf_counter()
+    shape, names_s = compute_shape_features(contours, imshape, cfg.PIXEL_RES)
+    shape_seconds = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    appearance, names_a = compute_appearance_features(image, contours, cfg.PIXEL_RES)
+    appearance_seconds = time.perf_counter() - t0
+    # 每家族的非有限值计数：只记不填（ECT 会在拟合前填 0，那是 sklearn 的硬要求），
+    # Task 5 按 NaN 剔列时才有据可查
+    entry.update(
+        {
+            "n_shape_features_raw": int(shape.shape[1]),
+            "n_appearance_features": int(appearance.shape[1]),
+            "n_nonfinite_shape": _count_nonfinite(shape),
+            "n_nonfinite_appearance": _count_nonfinite(appearance),
+            "shape_seconds": round(shape_seconds, 2),
+            "appearance_seconds": round(appearance_seconds, 2),
+        }
+    )
+    # 宽度为 0 的块（轮廓全退化）整帧跳过；宽度与名数不符则报错（列的含义不确定）
+    skip_reason = _unusable_block_reason(day, fov, shape, names_s, appearance, names_a)
+    if skip_reason:
+        entry["skipped_reason"] = skip_reason
+        result["line"] = f"[{day}/{fov}] 特征块宽度为 0（轮廓全部退化？），跳过该视野"
+        return result
+
+    result.update(
+        {
+            "skipped": False,
+            "meta": sub_meta,
+            "shape": shape,
+            "appearance": appearance,
+            "names_s": names_s,
+            "names_a": names_a,
+            "line": (
+                f"[{day}/{fov}] 实例 {len(keep_labels)} 个（无轮廓跳过 {len(meta) - len(keep_labels)} 个），"
+                f"形状 {shape.shape[1]} 维 {shape_seconds:.1f}s，外观 {appearance.shape[1]} 维 {appearance_seconds:.1f}s"
+            ),
+        }
+    )
+    return result
+
+
 def run_stage2(days: list[str] | None = None, fovs: list[str] | None = None) -> pd.DataFrame:
     """跑完 Stage 2 并落盘（Spec §6-Stage2）：逐视野算形状+外观，汇总成实例 × 特征表。
 
@@ -480,6 +574,7 @@ def run_stage2(days: list[str] | None = None, fovs: list[str] | None = None) -> 
     shape_names: list[str] = []
     appearance_names: list[str] = []
     qc: dict[str, dict] = {}
+    ordered_frames: list[tuple[str, str]] = []
 
     # 输入清单（--images/--masks）里没有的 (day, fov) 格子直接不跑：真实数据不保证每个视野每天都有图，
     # 硬按笛卡尔积跑会在缺失格子上报错、或在 Stage2 的 uid 核对里对不上 Stage1 的清单。
@@ -494,74 +589,27 @@ def run_stage2(days: list[str] | None = None, fovs: list[str] | None = None) -> 
         for fov in fov_list:
             if (str(day), str(fov)) not in frames:
                 continue  # 输入里没有这一格（Stage1 也没跑过它）
-            meta, contours_by_label, image = _stage1_catalog(day, fov)
-            imshape = image.shape
-            # 先核对"复用到的实例"与 Stage 1 汇总表是同一批，再往下算（对不上直接 RuntimeError）
-            uid_check = _cross_check_stage1_uids(day, fov, meta, stage1_uids)
-            # 只算有轮廓的实例；contours 里没有键的标签照样留在 meta 里，但这里数一下跳过多少
-            keep_labels = [int(label) for label in meta["label"] if int(label) in contours_by_label]
-            entry: dict = {
-                "n_instances_meta": len(meta),
-                "n_instances_computed": len(keep_labels),
-                "n_skipped_no_contour": len(meta) - len(keep_labels),
-                "uid_cross_check": uid_check,
-                "skipped_reason": None,
-            }
-            if not keep_labels:
-                # 整个视野一个可用轮廓都没有（分割失败，或标签全是退化小块）：宽度为 0 的块拼进
-                # vstack 会让整轮在最后一步崩掉，所以整帧跳过、记账、继续。
-                entry["skipped_reason"] = "no_usable_contour"
-                entry["n_shape_features_raw"] = 0
-                entry["n_appearance_features"] = 0
-                entry["n_nonfinite_shape"] = 0
-                entry["n_nonfinite_appearance"] = 0
-                entry["shape_seconds"] = 0.0
-                entry["appearance_seconds"] = 0.0
-                qc[f"{day}/{fov}"] = entry
-                print(f"[{day}/{fov}] 无可用轮廓（meta {len(meta)} 个实例全部跳过），跳过该视野")
-                continue
-            row_of_label = {int(label): row for row, label in enumerate(meta["label"])}
-            sub_meta = meta.iloc[[row_of_label[label] for label in keep_labels]].reset_index(drop=True)
-            contours = [contours_by_label[label] for label in keep_labels]
+            ordered_frames.append((str(day), str(fov)))
 
-            t0 = time.perf_counter()
-            shape, names_s = compute_shape_features(contours, imshape, cfg.PIXEL_RES)
-            shape_seconds = time.perf_counter() - t0
-            t0 = time.perf_counter()
-            appearance, names_a = compute_appearance_features(image, contours, cfg.PIXEL_RES)
-            appearance_seconds = time.perf_counter() - t0
-            # 每家族的非有限值计数：只记不填（ECT 会在拟合前填 0，那是 sklearn 的硬要求），
-            # Task 5 按 NaN 剔列时才有据可查
-            entry.update(
-                {
-                    "n_shape_features_raw": int(shape.shape[1]),
-                    "n_appearance_features": int(appearance.shape[1]),
-                    "n_nonfinite_shape": _count_nonfinite(shape),
-                    "n_nonfinite_appearance": _count_nonfinite(appearance),
-                    "shape_seconds": round(shape_seconds, 2),
-                    "appearance_seconds": round(appearance_seconds, 2),
-                }
-            )
-            # 宽度为 0 的块（轮廓全退化）整帧跳过；宽度与名数不符则报错（列的含义不确定）
-            skip_reason = _unusable_block_reason(day, fov, shape, names_s, appearance, names_a)
-            if skip_reason:
-                entry["skipped_reason"] = skip_reason
-                qc[f"{day}/{fov}"] = entry
-                print(f"[{day}/{fov}] 特征块宽度为 0（轮廓全部退化？），跳过该视野")
-                continue
-            if not shape_names:
-                shape_names, appearance_names = names_s, names_a
-            elif names_s != shape_names or names_a != appearance_names:
-                _fail(f"{day}/{fov} 的特征名与前面视野不一致，无法拼成同一张表（SPOT 版本或参数被改动？）")
-
-            shape_blocks.append(shape)
-            appearance_blocks.append(appearance)
-            meta_blocks.append(sub_meta)
-            qc[f"{day}/{fov}"] = entry
-            print(
-                f"[{day}/{fov}] 实例 {len(keep_labels)} 个（无轮廓跳过 {len(meta) - len(keep_labels)} 个），"
-                f"形状 {shape.shape[1]} 维 {shape_seconds:.1f}s，外观 {appearance.shape[1]} 维 {appearance_seconds:.1f}s"
-            )
+    # 各 (day, fov) 彼此独立（子进程只读自己那一对图），所以按视野并行；全实例一次拟合的
+    # ECT 降维仍在父进程对拼接后的矩阵做，口径不变。日志行随结果带回、按顺序打，行序同顺序执行。
+    results = parallel.map_frames(
+        functools.partial(_stage2_frame, stage1_uids=stage1_uids),
+        ordered_frames,
+    )
+    for result in results:
+        day, fov = result["day"], result["fov"]
+        print(result["line"])
+        qc[f"{day}/{fov}"] = result["entry"]
+        if result["skipped"]:
+            continue
+        if not shape_names:
+            shape_names, appearance_names = result["names_s"], result["names_a"]
+        elif result["names_s"] != shape_names or result["names_a"] != appearance_names:
+            _fail(f"{day}/{fov} 的特征名与前面视野不一致，无法拼成同一张表（SPOT 版本或参数被改动？）")
+        shape_blocks.append(result["shape"])
+        appearance_blocks.append(result["appearance"])
+        meta_blocks.append(result["meta"])
 
     shape_all = np.vstack(shape_blocks) if shape_blocks else np.zeros((0, 0))
     appearance_all = np.vstack(appearance_blocks) if appearance_blocks else np.zeros((0, 0))
