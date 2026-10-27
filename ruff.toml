@@ -1,0 +1,5 @@
+line-length = 120
+target-version = "py312"
+# docs/ 下是计划与设计文档（Markdown）；新版 ruff 会连带格式化 Markdown 里的 Python 代码块，
+# 把 `uv run ruff format .` 变成"顺手改文档"。排除掉，保证格式化只动代码。
+extend-exclude = ["docs"]

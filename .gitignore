@@ -1,0 +1,25 @@
+# === 本项目自身产物（可重新生成，不入库） ===
+output/
+# 旧式结果目录（早期手动跑单阶段脚本时用的名字）；本项目默认产物根是 output/
+test_outputs/
+
+# === Python 缓存 ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# === 环境 ===
+.venv/
+venv/
+.env
+
+# === 编辑器 / 系统 ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

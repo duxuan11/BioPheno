@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# BioPheno 是自包含项目：既有流水线代码（`biopheno/`），也内联（vendor）了它运行所需的 SPOT 库源码
+# （`SPOT/`）。因此不需要从 PyPI 装 SAM-SPOT，`import SPOT...` 直接命中本仓库内的这份副本。
+[tool.setuptools]
+packages = [
+    "biopheno",
+    "SPOT",
+    "SPOT.Analysis",
+    "SPOT.Detection",
+    "SPOT.Features",
+    "SPOT.Image",
+    "SPOT.Registration",
+    "SPOT.Tracking",
+    "SPOT.Utility_Functions",
+]
+
+[project]
+name = "biopheno"
+description = "BioPheno：类器官影像的 SAM 表型组分析流水线（自包含，Stage1→7 + 图 + 报告，内联 SPOT 库）"
+readme = "README.md"
+license = { text = "LICR Software License" }
+# 流水线代码用到 `Path | None` 这类在运行时求值的联合类型注解，因此下限是 3.10；
+# 实际开发与验证用的是 3.11 / 3.12。
+requires-python = ">=3.10, <3.14"
+version = "1.0.0"
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# 与内联的 SPOT 库（上游 2.0.1）保持同一份依赖清单：少一个都可能到某个 Stage 才炸，所以不做"精简"。
+# requirements.txt 是同一份清单的 pip 写法。
+dependencies = [
+    "numpy>=1.23",
+    "pillow",
+    "mahotas",
+    "matplotlib",
+    "scikit-image",
+    "scikit-learn",
+    "scipy",
+    "opencv-python-headless>=4.8",
+    "tqdm",
+    "tifffile",
+    "seaborn",
+    "networkx",
+    "hmmviz",
+    "hmmlearn",
+    "pandas",
+    "joblib",
+    "numexpr",
+    "imagecodecs",
+    "dtaidistance",
+    "umap-learn",
+    "pacmap",
+    "statsmodels",
+    "fastcluster",
+    "torch>=2.2",
+    "h5py",
+]
+
+[project.optional-dependencies]
+# pip 用户的开发依赖：`pip install -r requirements-dev.txt` 或 `pip install ".[dev]"`。
+dev = ["pytest"]
+# 只在内联 SPOT 库的 Keras 版检测/分割老代码里用到（本流水线用不到）。
+keras-legacy = ["tensorflow"]
+
+[dependency-groups]
+# uv 用户的开发依赖：`uv sync` 会把 dev 组（pytest）一起装上。
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+# 只收本项目 tests/ 下的用例；默认加 -q 之外不再加参数，需要详细输出时命令行再叠加 -v。
+testpaths = ["tests"]

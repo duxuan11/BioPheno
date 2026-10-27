@@ -1,0 +1,6 @@
+# 开发/测试依赖（pip 写法）：Runtime + pytest
+#
+#   pip install -r requirements-dev.txt
+#   python -m pytest tests -q
+-r requirements.txt
+pytest

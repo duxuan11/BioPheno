@@ -1,0 +1,34 @@
+# SPOT_AI 运行时依赖（pip 写法；与 pyproject.toml 的 [project].dependencies 同一份清单）
+#
+#   pip install -r requirements.txt
+#
+# 说明：
+# - 与内联的 SPOT 库（上游 2.0.1）的依赖保持一致，不做精简——少一个依赖可能到某个 Stage 才报错。
+# - 在 Windows 上 pip 可能会现场编译 `python-annoy`（PaCMAP 需要它）；卡住的话先
+#   `conda install -c conda-forge python-annoy`，或直接改用 uv（见 README）。
+# - torch 默认装的是 CPU 版；要用 GPU 版特征函数，先按 https://pytorch.org 装 CUDA 版再装本清单。
+numpy>=1.23
+pillow
+mahotas
+matplotlib
+scikit-image
+scikit-learn
+scipy
+opencv-python-headless>=4.8
+tqdm
+tifffile
+seaborn
+networkx
+hmmviz
+hmmlearn
+pandas
+joblib
+numexpr
+imagecodecs
+dtaidistance
+umap-learn
+pacmap
+statsmodels
+fastcluster
+torch>=2.2
+h5py

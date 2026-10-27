@@ -1,0 +1,173 @@
+# -*- coding: utf-8 -*-
+"""
+Download (and cache) the pretrained SPOT organoid detection and segmentation networks.
+
+    from SPOT.Detection.pretrained import get_pretrained_weights
+
+    ptfile = get_pretrained_weights('yolov3_organoid_detector')          # PyTorch .pt (downloads + converts once)
+    h5file = get_pretrained_weights('yolov3_organoid_detector', torch=False)  # the original Keras .h5
+
+Models (see README.md):
+
+    'yolov3_organoid_detector'          YOLOv3 organoid bounding box detector
+    'attn_unet_organoid_segmentation'   attention U-Net organoid segmentation of a bounding box crop
+
+Both are hosted on Zenodo (https://doi.org/10.5281/zenodo.23438299) and checked against their sha256 after download.
+
+Files are cached in the folder given by ``cache_dir``, else the SPOT_MODELS_DIR environment variable, else
+~/.cache/SPOT/models. A file already in the cache, or in the repository's models/ folder, is not downloaded again.
+
+@author: fyz11
+"""
+
+import hashlib
+import os
+import shutil
+import tempfile
+
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# the weights are hosted on Zenodo: https://doi.org/10.5281/zenodo.23438299
+ZENODO_RECORD = '23438299'
+ZENODO_URL = 'https://zenodo.org/records/' + ZENODO_RECORD + '/files/%s?download=1'
+
+PRETRAINED_MODELS = {
+    'yolov3_organoid_detector': dict(
+        url=ZENODO_URL % 'keras_YOLOv3_organoid_detector2.h5',
+        filename='keras_YOLOv3_organoid_detector2.h5',
+        repo_folder=os.path.join('models', 'detect_CNN_model'),
+        sha256='5780955baa6fe760de4a77fb5aa67c9b69c31378c75b0daab81d1d20f76b98c9'),
+    'attn_unet_organoid_segmentation': dict(
+        url=ZENODO_URL % 'organoid-bbox_attn_seg-unet-master-v2_64x64-8feats_v2.h5',
+        filename='organoid-bbox_attn_seg-unet-master-v2_64x64-8feats_v2.h5',
+        repo_folder=os.path.join('models', 'segment_CNN_model'),
+        sha256='b25c2303cba9ef8eb5c5e629e3030d6520933cdeac32733a93dd20365395f346'),
+}
+
+_HDF5_SIGNATURE = b'\x89HDF\r\n\x1a\n'
+
+
+def default_cache_dir():
+    """ the folder pretrained weights are cached in: $SPOT_MODELS_DIR, else ~/.cache/SPOT/models """
+    return os.environ.get('SPOT_MODELS_DIR', os.path.join(os.path.expanduser('~'), '.cache', 'SPOT', 'models'))
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def download_file(url, path, progress=True, timeout=60):
+    """ Download url to path (written to a temporary file first, so an interrupted download leaves no partial file).
+
+    Parameters
+    ----------
+    url : str
+    path : str
+        destination file
+    progress : bool
+        show a tqdm progress bar
+    timeout : float
+        socket timeout in seconds
+
+    Returns
+    -------
+    path : str
+    """
+    import urllib.request
+    from tqdm import tqdm
+
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    request = urllib.request.Request(url, headers={'User-Agent': 'SAM-SPOT'})
+    fd, tmp = tempfile.mkstemp(dir=folder, suffix='.part')
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response, os.fdopen(fd, 'wb') as out:
+            total = response.headers.get('Content-Length')
+            total = int(total) if total else None
+            with tqdm(total=total, unit='B', unit_scale=True, desc=os.path.basename(path), disable=not progress) as bar:
+                for block in iter(lambda: response.read(1 << 20), b''):
+                    out.write(block)
+                    bar.update(len(block))
+        shutil.move(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return path
+
+
+def _check_hdf5(path, name, url):
+    """ raise (and delete the file) if the download is not an HDF5 file, e.g. a web page of a moved / deleted file """
+    with open(path, 'rb') as f:
+        head = f.read(8)
+        if head == _HDF5_SIGNATURE:
+            return
+        page = (head + f.read(1 << 16)).decode('utf-8', errors='ignore')
+    os.remove(path)
+    reason = 'the hosted file has been deleted' if 'File Deleted' in page else              'the link may have changed or require a browser'
+    raise IOError('The download of %s from %s is not an HDF5 / Keras .h5 file (%s). Pass a working link with url=..., '
+                  'or download the file manually and place it in %s.' % (name, url, reason, os.path.dirname(path)))
+
+
+def get_pretrained_weights(name, torch=True, cache_dir=None, force_download=False, progress=True, url=None):
+    """ Path to the pretrained weights of a SPOT network, downloading (and converting to PyTorch) on first use.
+
+    Parameters
+    ----------
+    name : str
+        'yolov3_organoid_detector' or 'attn_unet_organoid_segmentation' (see PRETRAINED_MODELS)
+    torch : bool
+        if True return the PyTorch .pt (converted from the Keras .h5 with SPOT.Detection.convert_weights, needs torch
+        and h5py), else the Keras .h5
+    cache_dir : None or str
+        download folder. Default: $SPOT_MODELS_DIR, else ~/.cache/SPOT/models
+    force_download : bool
+        download (and convert) again even if the file is cached
+    progress : bool
+        show a download progress bar
+    url : None or str
+        download from this link instead of PRETRAINED_MODELS[name]['url'] (e.g. if the hosted file moved)
+
+    Returns
+    -------
+    path : str
+        the .pt (torch=True) or .h5 file
+    """
+    if name not in PRETRAINED_MODELS:
+        raise ValueError('unknown pretrained model %r, choose from %s' % (name, sorted(PRETRAINED_MODELS)))
+    info = PRETRAINED_MODELS[name]
+    cache_dir = cache_dir or default_cache_dir()
+
+    # a copy in the repository models/ folder (git checkout) or in the cache is used as is
+    h5file = None
+    if not force_download:
+        for folder in (os.path.join(REPO_DIR, info['repo_folder']), cache_dir):
+            candidate = os.path.join(folder, info['filename'])
+            if os.path.exists(candidate):
+                h5file = candidate
+                break
+    if h5file is None:
+        h5file = os.path.join(cache_dir, info['filename'])
+        url = url or info['url']
+        print('downloading %s to %s' % (name, h5file))
+        download_file(url, h5file, progress=progress)
+        _check_hdf5(h5file, name, url)
+        if info['sha256'] is not None and _sha256(h5file) != info['sha256']:
+            os.remove(h5file)
+            raise IOError('checksum mismatch for the download of %s' % name)
+    if not torch:
+        return h5file
+
+    ptfile = os.path.splitext(h5file)[0] + '.pt'
+    if force_download or not os.path.exists(ptfile) or os.path.getmtime(ptfile) < os.path.getmtime(h5file):
+        from .convert_weights import convert
+        try:
+            ptfile = convert(h5file, ptfile=ptfile)
+        except PermissionError:
+            # e.g. a read-only repository folder: convert into the cache instead
+            os.makedirs(cache_dir, exist_ok=True)
+            ptfile = convert(h5file, ptfile=os.path.join(cache_dir, os.path.basename(ptfile)))
+    return ptfile
