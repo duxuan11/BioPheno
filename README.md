@@ -31,7 +31,7 @@ BioPheno/
 │   ├─ features.py            ←   Stage 2：SAM 形状/外观/运动特征
 │   ├─ preprocess.py          ←   Stage 3：归一化、等权、去混杂、降维
 │   ├─ modules.py             ←   Stage 4：SAM 模块（共变特征的层次聚类）
-│   ├─ landscape.py           ←   Stage 5：UMAP + k-means 形态景观与簇编号
+│   ├─ landscape.py           ←   Stage 5：UMAP + k-means 切表型簇，再按原生离心率给簇编号
 │   ├─ temporal.py            ←   Stage 6：跨天配准与 tracklet 匹配
 │   ├─ temporal_stats.py      ←   Stage 6b：簇占比、转移矩阵、表型轨迹
 │   ├─ figures.py             ←   Stage 7：静态图 F1–F6b + 时间图 F7–F11（含 figures/README.md）
@@ -111,13 +111,20 @@ uv run python scripts/run_all.py \
 | Stage 2 | `features.py` | 用 SPOT 算 SAM 特征：形状、掩码内外观、光流运动，落 `features/` |
 | Stage 3 | `preprocess.py` | 剔除高方差/非有限列 → power transform + 标准化 → SAM 集合与特征族等权 → 去混杂 → ECT 降维，落 `preprocessed/` |
 | Stage 4 | `modules.py` | SAM 模块：共变特征的层次聚类，给出模块标签与模块表达，落 `modules/` |
-| Stage 5 | `landscape.py` | UMAP 嵌入 + k-means（肘部法选 K）→ 簇编号（按原生离心率排序），落 `analysis/` |
+| Stage 5 | `landscape.py` | UMAP 嵌入 + k-means（K 由 elbow/adjusted inertia 选）**切表型簇** → 再按簇内平均**原生**离心率给簇**编号** 1..K（离心率只决定编号顺序，不参与划分），落 `analysis/` |
 | Stage 6 | `temporal.py` | 跨天配准（对齐标签图）+ tracklet 匹配（bbox IoU + 质心距离），落 `analysis/` |
 | Stage 6b | `temporal_stats.py` | 簇占比、转移矩阵、表型轨迹，落 `analysis/` |
 | Stage 7 | `figures.py` + `report.py` | 静态图 F1–F6b、时间图 F7–F11、`figures/README.md`、`report.md` |
 
 一键运行时（`pipeline.py`）的约定：**顺序固定**、**逐阶段写日志**、**失败就停**（后面的阶段一个都不跑，
 也不写报告），每阶段耗时写进 `logs/run_all_timings.json`。
+
+> **关于 Stage 5 的簇编号**（易误读）：簇的构成完全由「Stage 3 预处理矩阵 → UMAP 2D → k-means」决定，
+> 离心率不参与划分；它只用来给**已经切好的**簇排编号（1 = 簇内平均偏心率最低、最圆；K = 最扁长），
+> 以对齐论文 Fig. 3 的口径。另外 `moment_eccentricity` 本身也是 Stage 3 特征矩阵里的一个 shape 特征，
+> 因此它**间接**影响嵌入与聚类，但没有被当成划分依据、也没有被单独加权。
+> `cluster_labels.csv` 里 `cluster` 是 1-based 编号、`cluster_raw` 是 k-means 原始 0-based 标签，
+> 两者的映射与排序 QC 都在 `kmeans_metrics.json`。
 
 ## 单阶段脚本
 
